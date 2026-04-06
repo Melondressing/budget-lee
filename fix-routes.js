@@ -19,7 +19,8 @@ try {
     '/*.jpg',
     '/*.jpeg',
     '/apple-touch-icon.png',
-    '/favicon.ico'
+    '/favicon.ico',
+    '/vendor/*'
   ];
   
   // 중복 제거

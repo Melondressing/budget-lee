@@ -10,10 +10,10 @@ const STATIC_ASSETS = [
   '/',
   '/static/app.js',
   '/static/style.css',
+  '/vendor/axios.min.js',
+  '/vendor/chart.umd.js',
   'https://cdn.tailwindcss.com',
-  'https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css',
-  'https://cdn.jsdelivr.net/npm/axios@1.6.0/dist/axios.min.js',
-  'https://cdn.jsdelivr.net/npm/chart.js'
+  'https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css'
 ];
 
 // 설치 이벤트 - 정적 파일 캐시

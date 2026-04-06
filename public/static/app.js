@@ -985,6 +985,10 @@ async function renderApp() {
   await switchView('home');
 }
 
+function isChartLibraryReady() {
+  return typeof Chart !== 'undefined';
+}
+
 function setupTabListeners() {
   document.getElementById('tab-home').onclick = () => switchView('home');
   document.getElementById('tab-month').onclick = () => switchView('month');
@@ -1345,7 +1349,10 @@ async function renderHomeView() {
 // 홈 화면 카테고리 차트 그리기
 function drawHomeCategoryChart(expenseByCategory, categoryBudgetMap, hasBudgets) {
   const canvas = document.getElementById('home-category-chart');
-  if (!canvas) return;
+  if (!canvas || !isChartLibraryReady()) {
+    console.warn('[Charts] Chart.js is not available for home category chart');
+    return;
+  }
   
   const ctx = canvas.getContext('2d');
   const categories = Object.keys(expenseByCategory).sort((a, b) => expenseByCategory[b] - expenseByCategory[a]);
@@ -1408,7 +1415,10 @@ function drawHomeCategoryChart(expenseByCategory, categoryBudgetMap, hasBudgets)
 // 홈 화면 비교 차트 그리기
 function drawHomeComparisonChart(income, expense, savings) {
   const canvas = document.getElementById('home-comparison-chart');
-  if (!canvas) return;
+  if (!canvas || !isChartLibraryReady()) {
+    console.warn('[Charts] Chart.js is not available for home comparison chart');
+    return;
+  }
   
   const ctx = canvas.getContext('2d');
   
@@ -1623,7 +1633,10 @@ async function renderMonthView() {
 // 파이차트 그리기
 function drawPieChart(canvasId, income, expense, savings) {
   const canvas = document.getElementById(canvasId);
-  if (!canvas) return;
+  if (!canvas || !isChartLibraryReady()) {
+    console.warn('[Charts] Chart.js is not available for pie chart:', canvasId);
+    return;
+  }
   
   const ctx = canvas.getContext('2d');
   const total = income + expense + savings;
@@ -4567,6 +4580,10 @@ async function loadCategoryTransactions(category) {
 // 바 차트 그리기 함수들
 function drawYearlyBarChart(data) {
   const ctx = document.getElementById('report-chart');
+  if (!ctx || !isChartLibraryReady()) {
+    console.warn('[Charts] Chart.js is not available for yearly chart');
+    return;
+  }
   
   if (reportChart) {
     reportChart.destroy();
@@ -4638,6 +4655,10 @@ function drawYearlyBarChart(data) {
 
 function drawCategoryBarChart(data, monthLabel) {
   const ctx = document.getElementById('report-chart');
+  if (!ctx || !isChartLibraryReady()) {
+    console.warn('[Charts] Chart.js is not available for category chart');
+    return;
+  }
   
   if (reportChart) {
     reportChart.destroy();
@@ -8085,5 +8106,22 @@ setTimeout(() => {
   setupLogoutHandler();
 }, 100);
 
+function showBootstrapError(error) {
+  console.error('[Bootstrap] Fatal render error:', error);
+
+  const app = document.getElementById('app');
+  if (!app) return;
+
+  app.innerHTML = `
+    <div class="min-h-screen flex items-center justify-center bg-gray-100">
+      <div class="max-w-lg w-full bg-white border border-red-200 rounded-lg shadow-lg p-6 mx-4">
+        <h1 class="text-xl font-bold text-red-700 mb-3">Budget Lee loading error</h1>
+        <p class="text-gray-700 mb-4">앱을 불러오는 중 오류가 발생했습니다. 새로고침 후 다시 시도해주세요.</p>
+        <pre class="text-xs bg-gray-50 border rounded p-3 overflow-auto whitespace-pre-wrap">${String(error?.message || error)}</pre>
+      </div>
+    </div>
+  `;
+}
+
 // 앱 초기화 - 페이지 로드 시 인증 확인 후 적절한 화면 렌더링
-renderApp();
+renderApp().catch(showBootstrapError);

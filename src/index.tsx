@@ -103,6 +103,7 @@ app.use('/api/*', async (c, next) => {
 
 // 정적 파일 서빙
 app.use('/static/*', serveStatic({ root: './' }))
+app.use('/vendor/*', serveStatic({ root: './' }))
 
 // ========== 인증 유틸리티 함수 ==========
 
@@ -1885,8 +1886,8 @@ app.get('/', (c) => {
     <!-- 모달들이 여기에 동적으로 추가됩니다 -->
     <div id="modal-container"></div>
 
-    <script src="https://cdn.jsdelivr.net/npm/axios@1.6.0/dist/axios.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="/vendor/axios.min.js"></script>
+    <script src="/vendor/chart.umd.js"></script>
     <script src="/static/i18n.js?v=${Date.now()}"></script>
     <script src="/static/app.js?v=${Date.now()}"></script>
     <script>
