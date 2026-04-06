@@ -52,7 +52,7 @@ const state = {
   // 인증 관련 상태
   isAuthenticated: false,
   currentUser: null,
-  authToken: localStorage.getItem('authToken') || null
+  authToken: localStorage.getItem('authToken') || localStorage.getItem('auth_token') || null
 };
 
 // 배경 테마 정의 - 다국어 지원
@@ -108,14 +108,24 @@ const BACKGROUND_THEMES = getBackgroundThemes();
 // 카테고리 정의 - 다국어 지원
 
 function getCategories() {
+  const unique = (values) => [...new Set(values.filter(Boolean))];
+
   return {
-    income: [
+    income: unique([
       t('category.income.salary'),
       t('category.income.bonus'),
       t('category.income.side'),
-      t('category.income.other')
-    ],
-    expense: [
+      t('category.income.other'),
+      'Salary',
+      'Bonus',
+      'Side Income',
+      'Other Income',
+      '급여',
+      '상여금',
+      '부수입',
+      '기타수입'
+    ]),
+    expense: unique([
       t('category.expense.clothing'),
       t('category.expense.food'),
       t('category.expense.housing'),
@@ -126,16 +136,57 @@ function getCategories() {
       t('category.expense.education'),
       t('category.expense.communication'),
       t('category.expense.insurance'),
-      t('category.expense.other')
-    ],
-    savings: [
-      t('category.savings.savings')
-    ]
+      t('category.expense.other'),
+      'Clothing',
+      'Food',
+      'Housing',
+      'Living',
+      'Transport',
+      'Entertainment',
+      'Culture',
+      'Shopping',
+      'Medical',
+      'Education',
+      'Communication',
+      'Insurance',
+      'Other',
+      '식비',
+      '교통비',
+      '주거비',
+      '문화생활',
+      '쇼핑',
+      '의료비',
+      '교육비',
+      '통신비',
+      '보험',
+      '기타지출',
+      '의복비'
+    ]),
+    savings: unique([
+      t('category.savings.savings'),
+      'Savings',
+      '저축'
+    ])
   };
 }
 
 // Dynamic categories based on current language
 const categories = getCategories();
+
+function registerCategory(type, category) {
+  if (!type || !category || !categories[type]) return;
+  if (!categories[type].includes(category)) {
+    categories[type].push(category);
+  }
+}
+
+function registerCategoriesFromRecords(records, typeKey) {
+  if (!Array.isArray(records)) return;
+  records.forEach((record) => {
+    if (!record?.category) return;
+    registerCategory(typeKey || record.type || 'expense', record.category);
+  });
+}
 
 // 통화 정의
 
@@ -390,6 +441,7 @@ function setAuthToken(accessToken, refreshToken) {
   console.log('[Auth] Setting tokens - Access:', accessToken?.substring(0, 20) + '...', 'Refresh:', refreshToken?.substring(0, 20) + '...');
   state.authToken = accessToken;
   localStorage.setItem('authToken', accessToken);
+  localStorage.setItem('auth_token', accessToken);
   localStorage.setItem('refreshToken', refreshToken);
   axios.defaults.headers.common['Authorization'] = `Bearer ${accessToken}`;
   console.log('[Auth] Tokens set successfully');
@@ -400,23 +452,27 @@ function clearAuthToken() {
   state.isAuthenticated = false;
   state.currentUser = null;
   localStorage.removeItem('authToken');
+  localStorage.removeItem('auth_token');
   localStorage.removeItem('refreshToken');
   delete axios.defaults.headers.common['Authorization'];
 }
 
 async function checkAuth() {
-  const token = localStorage.getItem('authToken');
-  
-  if (!token) {
-    return false;
-  }
-  
+  const token = localStorage.getItem('authToken') || localStorage.getItem('auth_token');
+  const sessionId = localStorage.getItem('sessionId');
+
   try {
-    axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+    if (token) {
+      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+    } else if (sessionId) {
+      axios.defaults.headers.common['Authorization'] = `Bearer ${sessionId}`;
+    } else {
+      delete axios.defaults.headers.common['Authorization'];
+    }
     
     const response = await axios.get('/api/auth/me');
     
-    if (response.data.success) {
+    if (response.data.success && response.data.user) {
       state.isAuthenticated = true;
       state.currentUser = response.data.user;
       return true;
@@ -424,6 +480,7 @@ async function checkAuth() {
   } catch (error) {
     console.error('[Auth] Check failed:', error);
     localStorage.removeItem('authToken');
+    localStorage.removeItem('auth_token');
     delete axios.defaults.headers.common['Authorization'];
   }
   
@@ -441,6 +498,7 @@ axios.interceptors.response.use(
     if (status === 401) {
       console.warn('[Auth] 401 Unauthorized - 토큰 만료, 로그아웃 처리');
       localStorage.removeItem('authToken');
+      localStorage.removeItem('auth_token');
       delete axios.defaults.headers.common['Authorization'];
       
       if (state.isAuthenticated) {
@@ -525,6 +583,7 @@ async function handleLogin(event) {
     // 로컬 저장 + Authorization 헤더 세팅
     console.log('[Login] Setting token...');
     localStorage.setItem('authToken', token);
+    localStorage.setItem('auth_token', token);
     axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
     
     // 자동 로그인 설정
@@ -592,6 +651,7 @@ async function handleRegister(event) {
     
     if (token) {
       localStorage.setItem('authToken', token);
+      localStorage.setItem('auth_token', token);
       axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
     }
     
@@ -608,6 +668,7 @@ function handleLogout() {
   if (confirm('로그아웃 하시겠습니까?')) {
     // 인증 토큰만 제거 (로그아웃)
     localStorage.removeItem('authToken');
+    localStorage.removeItem('auth_token');
     
     // "로그인 상태 유지" 옵션도 제거 (로그아웃하면 초기화)
     localStorage.removeItem('rememberMe');
@@ -615,7 +676,12 @@ function handleLogout() {
     // 중요: savedUsername, 거래내역, 설정 등은 유지 (절대 삭제 안 함)
     // 중요: localStorage에 저장된 모든 재무 데이터 보호
     
-    delete axios.defaults.headers.common['Authorization'];
+    const sessionId = localStorage.getItem('sessionId');
+    if (sessionId) {
+      axios.defaults.headers.common['Authorization'] = `Bearer ${sessionId}`;
+    } else {
+      delete axios.defaults.headers.common['Authorization'];
+    }
     state.isAuthenticated = false;
     state.currentUser = null;
     
@@ -1015,6 +1081,7 @@ async function fetchTransactions(startDate, endDate, type = null) {
     const response = await axios.get(url);
     if (response.data.success) {
       state.transactions = response.data.data;
+      registerCategoriesFromRecords(state.transactions);
     }
   } catch (error) {}
 }
@@ -1035,6 +1102,7 @@ async function fetchFixedExpenses() {
     const response = await axios.get('/api/fixed-expenses');
     if (response.data.success) {
       state.fixedExpenses = response.data.data;
+      registerCategoriesFromRecords(state.fixedExpenses, 'expense');
     }
   } catch (error) {}
 }
@@ -1059,6 +1127,7 @@ async function fetchBudgets() {
     const response = await axios.get('/api/budgets');
     if (response.data.success) {
       state.budgets = response.data.data;
+      registerCategoriesFromRecords(state.budgets, 'expense');
     }
   } catch (error) {}
 }
@@ -7973,6 +8042,7 @@ function setupLogoutHandler() {
   if (logoutBtn) {
     logoutBtn.addEventListener('click', async () => {
       // 로컬 스토리지에서 토큰 삭제
+      localStorage.removeItem('authToken');
       localStorage.removeItem('auth_token');
       localStorage.removeItem('user_email');
       localStorage.removeItem('user_name');

@@ -379,6 +379,21 @@ app.get('/api/auth/me', authMiddleware, async (c) => {
       user: { id: 1, username: 'guest', name: 'Guest User', isGuest: true } 
     })
   }
+
+  // Legacy session-based users may have data without a row in `users`.
+  // Treat them as valid guest sessions so existing data remains reachable.
+  if (typeof username === 'string' && username.startsWith('session_')) {
+    return c.json({
+      success: true,
+      user: {
+        id: userId,
+        username,
+        name: 'Guest Session',
+        isGuest: true,
+        isSession: true
+      }
+    })
+  }
   
   const { DB } = c.env
   const user = await DB.prepare(`
@@ -723,6 +738,27 @@ app.post('/api/auth/logout', async (c) => {
 app.get('/api/auth/me', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
+  const username = c.get('username')
+
+  if (!userId || userId === 1) {
+    return c.json({
+      success: true,
+      user: { id: 1, username: 'guest', name: 'Guest User', isGuest: true }
+    })
+  }
+
+  if (typeof username === 'string' && username.startsWith('session_')) {
+    return c.json({
+      success: true,
+      user: {
+        id: userId,
+        username,
+        name: 'Guest Session',
+        isGuest: true,
+        isSession: true
+      }
+    })
+  }
   
   const user = await DB.prepare(`
     SELECT id, username, name, created_at, last_login FROM users WHERE id = ?
