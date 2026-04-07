@@ -295,6 +295,8 @@ async function recalcMonthlySummary(DB: D1Database, userId: number, yearMonth: s
   const lastDay = new Date(year, month, 0).getDate()
   const startDate = `${yearMonth}-01`
   const endDate = `${yearMonth}-${String(lastDay).padStart(2, '0')}`
+  const userBindings = getUserIdBindings(userId)
+  const userPlaceholders = userBindings.map(() => '?').join(', ')
   
   // 해당 월의 거래 내역 집계
   const summary = await DB.prepare(`
@@ -304,8 +306,8 @@ async function recalcMonthlySummary(DB: D1Database, userId: number, yearMonth: s
       SUM(CASE WHEN type='savings' THEN amount ELSE 0 END) as savings,
       COUNT(*) as transaction_count
     FROM transactions
-    WHERE user_id = ? AND date BETWEEN ? AND ?
-  `).bind(String(userId), startDate, endDate).first() as any
+    WHERE user_id IN (${userPlaceholders}) AND date BETWEEN ? AND ?
+  `).bind(...userBindings, startDate, endDate).first() as any
   
   const income = summary?.income || 0
   const expense = summary?.expense || 0
@@ -336,6 +338,28 @@ function normalizeOptionalInteger(value: unknown): number | null {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) return null
   return parsed
+}
+
+function getUserIdBindings(userId: number | string | undefined | null): string[] {
+  if (userId === undefined || userId === null || userId === '') return []
+
+  const raw = String(userId)
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed)) {
+    return [raw]
+  }
+
+  const canonical = String(Math.trunc(parsed))
+  return Array.from(new Set([canonical, `${Math.trunc(parsed)}.0`, raw]))
+}
+
+function buildUserIdClause(columnName: string, userId: number | string | undefined | null): { clause: string; bindings: string[] } {
+  const bindings = getUserIdBindings(userId)
+  const placeholders = bindings.map(() => '?').join(', ')
+  return {
+    clause: `${columnName} IN (${placeholders})`,
+    bindings
+  }
 }
 
 // CORS 활성화
@@ -1003,6 +1027,8 @@ app.get('/api/auth/me', authMiddleware, async (c) => {
 app.get('/api/savings-accounts', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
+  const savingsScope = buildUserIdClause('sa.user_id', userId)
+  const transactionScope = buildUserIdClause('t.user_id', userId)
   
   if (!DB) {
     return c.json({ success: true, data: [] })
@@ -1013,11 +1039,11 @@ app.get('/api/savings-accounts', authMiddleware, async (c) => {
       sa.*,
       COALESCE(SUM(CASE WHEN t.type = 'savings' THEN t.amount ELSE 0 END), 0) as total_savings
     FROM savings_accounts sa
-    LEFT JOIN transactions t ON t.savings_account_id = sa.id AND t.user_id = ?
-    WHERE sa.user_id = ?
+    LEFT JOIN transactions t ON t.savings_account_id = sa.id AND ${transactionScope.clause}
+    WHERE ${savingsScope.clause}
     GROUP BY sa.id
     ORDER BY sa.created_at ASC
-  `).bind(userId?.toString(), userId?.toString()).all()
+  `).bind(...transactionScope.bindings, ...savingsScope.bindings).all()
   
   return c.json({ success: true, data: result.results })
 })
@@ -1100,6 +1126,7 @@ app.get('/api/transactions', authMiddleware, async (c) => {
   const endDate = c.req.query('end_date')
   const type = c.req.query('type')
   const accountLinkingEnabled = await hasPersonalAccountLinking(DB)
+  const userScope = buildUserIdClause('t.user_id', userId)
   
   let query = `
     SELECT 
@@ -1109,9 +1136,9 @@ app.get('/api/transactions', authMiddleware, async (c) => {
     FROM transactions t
     LEFT JOIN savings_accounts sa ON t.savings_account_id = sa.id
     ${accountLinkingEnabled ? 'LEFT JOIN accounts a ON t.account_id = a.id' : ''}
-    WHERE t.user_id = ?
+    WHERE ${userScope.clause}
   `
-  const params: any[] = [userId?.toString()]
+  const params: any[] = [...userScope.bindings]
   
   if (startDate) {
     query += ` AND t.date >= ?`
@@ -1138,6 +1165,7 @@ app.get('/api/transactions/date/:date', authMiddleware, async (c) => {
   const userId = c.get('userId')
   const date = c.req.param('date')
   const accountLinkingEnabled = await hasPersonalAccountLinking(DB)
+  const userScope = buildUserIdClause('t.user_id', userId)
   
   const result = await DB.prepare(`
     SELECT 
@@ -1147,9 +1175,9 @@ app.get('/api/transactions/date/:date', authMiddleware, async (c) => {
     FROM transactions t
     LEFT JOIN savings_accounts sa ON t.savings_account_id = sa.id
     ${accountLinkingEnabled ? 'LEFT JOIN accounts a ON t.account_id = a.id' : ''}
-    WHERE t.date = ? AND t.user_id = ?
+    WHERE t.date = ? AND ${userScope.clause}
     ORDER BY t.created_at DESC
-  `).bind(date, userId?.toString()).all()
+  `).bind(date, ...userScope.bindings).all()
   
   return c.json({ success: true, data: result.results })
 })
@@ -1227,6 +1255,7 @@ app.post('/api/transactions/bulk-update', authMiddleware, async (c) => {
   }
 
   const normalizedAccountId = accountLinkingEnabled ? normalizeOptionalInteger(account_id) : null
+  const transactionScope = buildUserIdClause('user_id', userId)
   if (payment_method && !validPaymentMethods.includes(payment_method)) {
     return c.json({ success: false, error: '유효하지 않은 결제수단입니다.' }, 400)
   }
@@ -1245,8 +1274,8 @@ app.post('/api/transactions/bulk-update', authMiddleware, async (c) => {
   const transactionsResult = await DB.prepare(`
     SELECT id, type, amount, ${accountLinkingEnabled ? 'account_id' : 'NULL as account_id'}, payment_method
     FROM transactions
-    WHERE user_id = ? AND id IN (${placeholders})
-  `).bind(userId?.toString(), ...normalizedIds).all()
+    WHERE ${transactionScope.clause} AND id IN (${placeholders})
+  `).bind(...transactionScope.bindings, ...normalizedIds).all()
 
   const transactions = (transactionsResult.results || []) as any[]
   if (transactions.length === 0) {
@@ -1270,13 +1299,13 @@ app.post('/api/transactions/bulk-update', authMiddleware, async (c) => {
         ? DB.prepare(`
             UPDATE transactions
             SET payment_method = ?, account_id = ?
-            WHERE id = ? AND user_id = ?
-          `).bind(nextPaymentMethod, nextAccountId, transaction.id, userId?.toString())
+            WHERE id = ? AND ${transactionScope.clause}
+          `).bind(nextPaymentMethod, nextAccountId, transaction.id, ...transactionScope.bindings)
         : DB.prepare(`
             UPDATE transactions
             SET payment_method = ?
-            WHERE id = ? AND user_id = ?
-          `).bind(nextPaymentMethod, transaction.id, userId?.toString())
+            WHERE id = ? AND ${transactionScope.clause}
+          `).bind(nextPaymentMethod, transaction.id, ...transactionScope.bindings)
     )
 
     if (accountLinkingEnabled && nextAccountId && transaction.account_id !== nextAccountId) {
@@ -1301,6 +1330,7 @@ app.put('/api/transactions/:id', authMiddleware, async (c) => {
   const id = c.req.param('id')
   const { type, category, amount, description, date, payment_method, savings_account_id, account_id } = await c.req.json()
   const accountLinkingEnabled = await hasPersonalAccountLinking(DB)
+  const transactionScope = buildUserIdClause('user_id', userId)
   
   if (!type || !category || !amount || !date) {
     return c.json({ success: false, error: '필수 항목을 입력해주세요.' }, 400)
@@ -1308,8 +1338,8 @@ app.put('/api/transactions/:id', authMiddleware, async (c) => {
   
   // 기존 거래 조회 (날짜 변경 감지용)
   const oldTransaction = await DB.prepare(`
-    SELECT date, type, amount, ${accountLinkingEnabled ? 'account_id' : 'NULL as account_id'} FROM transactions WHERE id = ? AND user_id = ?
-  `).bind(id, userId?.toString()).first() as any
+    SELECT date, type, amount, ${accountLinkingEnabled ? 'account_id' : 'NULL as account_id'} FROM transactions WHERE id = ? AND ${transactionScope.clause}
+  `).bind(id, ...transactionScope.bindings).first() as any
 
   if (!oldTransaction) {
     return c.json({ success: false, error: '거래를 찾을 수 없습니다.' }, 404)
@@ -1338,13 +1368,13 @@ app.put('/api/transactions/:id', authMiddleware, async (c) => {
       ? DB.prepare(`
           UPDATE transactions 
           SET type = ?, category = ?, amount = ?, description = ?, date = ?, payment_method = ?, savings_account_id = ?, account_id = ?
-          WHERE id = ? AND user_id = ?
-        `).bind(type, category, amount, description || null, date, payment_method || 'card', savings_account_id || null, normalizedAccountId, id, userId?.toString())
+          WHERE id = ? AND ${transactionScope.clause}
+        `).bind(type, category, amount, description || null, date, payment_method || 'card', savings_account_id || null, normalizedAccountId, id, ...transactionScope.bindings)
       : DB.prepare(`
           UPDATE transactions 
           SET type = ?, category = ?, amount = ?, description = ?, date = ?, payment_method = ?, savings_account_id = ?
-          WHERE id = ? AND user_id = ?
-        `).bind(type, category, amount, description || null, date, payment_method || 'card', savings_account_id || null, id, userId?.toString())
+          WHERE id = ? AND ${transactionScope.clause}
+        `).bind(type, category, amount, description || null, date, payment_method || 'card', savings_account_id || null, id, ...transactionScope.bindings)
   )
 
   if (accountLinkingEnabled && normalizedAccountId) {
@@ -1375,11 +1405,12 @@ app.delete('/api/transactions/:id', authMiddleware, async (c) => {
   const userId = c.get('userId')
   const id = c.req.param('id')
   const accountLinkingEnabled = await hasPersonalAccountLinking(DB)
+  const transactionScope = buildUserIdClause('user_id', userId)
   
   // 삭제 전 날짜 조회 (캐시 업데이트용)
   const transaction = await DB.prepare(`
-    SELECT date, type, amount, ${accountLinkingEnabled ? 'account_id' : 'NULL as account_id'} FROM transactions WHERE id = ? AND user_id = ?
-  `).bind(id, userId?.toString()).first() as any
+    SELECT date, type, amount, ${accountLinkingEnabled ? 'account_id' : 'NULL as account_id'} FROM transactions WHERE id = ? AND ${transactionScope.clause}
+  `).bind(id, ...transactionScope.bindings).first() as any
 
   if (!transaction) {
     return c.json({ success: false, error: '거래를 찾을 수 없습니다.' }, 404)
@@ -1394,7 +1425,7 @@ app.delete('/api/transactions/:id', authMiddleware, async (c) => {
   }
 
   batch.push(
-    DB.prepare(`DELETE FROM transactions WHERE id = ? AND user_id = ?`).bind(id, userId?.toString())
+    DB.prepare(`DELETE FROM transactions WHERE id = ? AND ${transactionScope.clause}`).bind(id, ...transactionScope.bindings)
   )
 
   await DB.batch(batch)
@@ -1415,6 +1446,7 @@ app.get('/api/statistics/monthly/:yearMonth', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
   const yearMonth = c.req.param('yearMonth')
+  const transactionScope = buildUserIdClause('user_id', userId)
   
   // 캐시된 월별 요약 확인
   const cachedSummary = await DB.prepare(`
@@ -1433,9 +1465,9 @@ app.get('/api/statistics/monthly/:yearMonth', authMiddleware, async (c) => {
       type,
       SUM(amount) as total
     FROM transactions
-    WHERE strftime('%Y-%m', date) = ? AND user_id = ?
+    WHERE strftime('%Y-%m', date) = ? AND ${transactionScope.clause}
     GROUP BY type
-  `).bind(yearMonth, userId?.toString()).all()
+  `).bind(yearMonth, ...transactionScope.bindings).all()
   
   const expenseByCategory = await DB.prepare(`
     SELECT 
@@ -1443,10 +1475,10 @@ app.get('/api/statistics/monthly/:yearMonth', authMiddleware, async (c) => {
       SUM(amount) as total,
       COUNT(*) as count
     FROM transactions
-    WHERE type = 'expense' AND strftime('%Y-%m', date) = ? AND user_id = ?
+    WHERE type = 'expense' AND strftime('%Y-%m', date) = ? AND ${transactionScope.clause}
     GROUP BY category
     ORDER BY total DESC
-  `).bind(yearMonth, userId?.toString()).all()
+  `).bind(yearMonth, ...transactionScope.bindings).all()
   
   return c.json({ 
     success: true, 
@@ -1461,6 +1493,7 @@ app.get('/api/statistics/weekly/:startDate', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
   const startDate = c.req.param('startDate')
+  const transactionScope = buildUserIdClause('user_id', userId)
   
   const endDate = new Date(startDate)
   endDate.setDate(endDate.getDate() + 6)
@@ -1471,9 +1504,9 @@ app.get('/api/statistics/weekly/:startDate', authMiddleware, async (c) => {
       type,
       SUM(amount) as total
     FROM transactions
-    WHERE date >= ? AND date <= ? AND user_id = ?
+    WHERE date >= ? AND date <= ? AND ${transactionScope.clause}
     GROUP BY type
-  `).bind(startDate, endDateStr, userId?.toString()).all()
+  `).bind(startDate, endDateStr, ...transactionScope.bindings).all()
   
   const expenseByCategory = await DB.prepare(`
     SELECT 
@@ -1481,10 +1514,10 @@ app.get('/api/statistics/weekly/:startDate', authMiddleware, async (c) => {
       SUM(amount) as total,
       COUNT(*) as count
     FROM transactions
-    WHERE type = 'expense' AND date >= ? AND date <= ? AND user_id = ?
+    WHERE type = 'expense' AND date >= ? AND date <= ? AND ${transactionScope.clause}
     GROUP BY category
     ORDER BY total DESC
-  `).bind(startDate, endDateStr, userId?.toString()).all()
+  `).bind(startDate, endDateStr, ...transactionScope.bindings).all()
   
   return c.json({ 
     success: true, 
@@ -1498,6 +1531,7 @@ app.get('/api/calendar/:yearMonth', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
   const yearMonth = c.req.param('yearMonth')
+  const transactionScope = buildUserIdClause('user_id', userId)
   
   const result = await DB.prepare(`
     SELECT 
@@ -1506,10 +1540,10 @@ app.get('/api/calendar/:yearMonth', authMiddleware, async (c) => {
       SUM(amount) as total,
       COUNT(*) as count
     FROM transactions
-    WHERE strftime('%Y-%m', date) = ? AND user_id = ?
+    WHERE strftime('%Y-%m', date) = ? AND ${transactionScope.clause}
     GROUP BY date, type
     ORDER BY date ASC
-  `).bind(yearMonth, userId?.toString()).all()
+  `).bind(yearMonth, ...transactionScope.bindings).all()
   
   return c.json({ success: true, data: result.results })
 })
@@ -1520,10 +1554,14 @@ app.get('/api/calendar/:yearMonth', authMiddleware, async (c) => {
 app.get('/api/settings', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
+  const settingsScope = buildUserIdClause('user_id', userId)
   
   let result = await DB.prepare(`
-    SELECT * FROM settings WHERE user_id = ?
-  `).bind(userId?.toString()).first()
+    SELECT * FROM settings
+    WHERE ${settingsScope.clause}
+    ORDER BY CASE WHEN user_id = ? THEN 0 ELSE 1 END, updated_at DESC, id DESC
+    LIMIT 1
+  `).bind(...settingsScope.bindings, userId?.toString()).first()
   
   // 사용자의 설정이 없으면 기본 설정 생성
   if (!result) {
@@ -1583,12 +1621,13 @@ app.put('/api/settings', authMiddleware, async (c) => {
 app.get('/api/fixed-expenses', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
+  const fixedExpenseScope = buildUserIdClause('user_id', userId)
   
   const result = await DB.prepare(`
     SELECT * FROM fixed_expenses 
-    WHERE is_active = 1 AND user_id = ?
+    WHERE is_active = 1 AND ${fixedExpenseScope.clause}
     ORDER BY created_at DESC
-  `).bind(userId?.toString()).all()
+  `).bind(...fixedExpenseScope.bindings).all()
   
   return c.json({ success: true, data: result.results })
 })
@@ -2043,10 +2082,11 @@ function formatDate(date: Date): string {
 app.get('/api/budgets', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
+  const budgetScope = buildUserIdClause('user_id', userId)
   
   const result = await DB.prepare(`
-    SELECT * FROM category_budgets WHERE user_id = ? ORDER BY category ASC
-  `).bind(userId?.toString()).all()
+    SELECT * FROM category_budgets WHERE ${budgetScope.clause} ORDER BY category ASC
+  `).bind(...budgetScope.bindings).all()
   
   return c.json({ success: true, data: result.results })
 })
@@ -2091,6 +2131,8 @@ app.get('/api/budgets/vs-spending/:yearMonth', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
   const yearMonth = c.req.param('yearMonth')
+  const budgetScope = buildUserIdClause('cb.user_id', userId)
+  const transactionScope = buildUserIdClause('t.user_id', userId)
   
   const result = await DB.prepare(`
     SELECT 
@@ -2105,15 +2147,73 @@ app.get('/api/budgets/vs-spending/:yearMonth', authMiddleware, async (c) => {
     FROM category_budgets cb
     LEFT JOIN transactions t ON t.category = cb.category 
       AND t.type = 'expense' 
-      AND t.user_id = ?
+      AND ${transactionScope.clause}
       AND strftime('%Y-%m', t.date) = ?
-    WHERE cb.user_id = ?
+    WHERE ${budgetScope.clause}
       AND cb.monthly_budget > 0
     GROUP BY cb.category, cb.monthly_budget
     ORDER BY cb.category ASC
-  `).bind(userId?.toString(), yearMonth, userId?.toString()).all()
+  `).bind(...transactionScope.bindings, yearMonth, ...budgetScope.bindings).all()
   
   return c.json({ success: true, data: result.results })
+})
+
+app.get('/api/categories', authMiddleware, async (c) => {
+  const { DB } = c.env
+  const userId = c.get('userId')
+  const transactionScope = buildUserIdClause('user_id', userId)
+  const budgetScope = buildUserIdClause('user_id', userId)
+  const fixedExpenseScope = buildUserIdClause('user_id', userId)
+  const customCategoryScope = buildUserIdClause('user_id', userId)
+
+  const result = await DB.prepare(`
+    SELECT category, type
+    FROM (
+      SELECT category, type
+      FROM transactions
+      WHERE ${transactionScope.clause}
+
+      UNION
+
+      SELECT category, 'expense' as type
+      FROM category_budgets
+      WHERE ${budgetScope.clause}
+
+      UNION
+
+      SELECT category, 'expense' as type
+      FROM fixed_expenses
+      WHERE is_active = 1 AND ${fixedExpenseScope.clause}
+
+      UNION
+
+      SELECT name as category, type
+      FROM custom_categories
+      WHERE is_active = 1 AND ${customCategoryScope.clause}
+    )
+    WHERE category IS NOT NULL AND TRIM(category) != ''
+    ORDER BY type ASC, category ASC
+  `).bind(
+    ...transactionScope.bindings,
+    ...budgetScope.bindings,
+    ...fixedExpenseScope.bindings,
+    ...customCategoryScope.bindings
+  ).all()
+
+  const grouped = {
+    income: [] as string[],
+    expense: [] as string[],
+    savings: [] as string[]
+  }
+
+  for (const row of (result.results || []) as any[]) {
+    const type = ['income', 'expense', 'savings'].includes(row.type) ? row.type : 'expense'
+    if (!grouped[type as keyof typeof grouped].includes(row.category)) {
+      grouped[type as keyof typeof grouped].push(row.category)
+    }
+  }
+
+  return c.json({ success: true, data: grouped })
 })
 
 // 투자 관리 API

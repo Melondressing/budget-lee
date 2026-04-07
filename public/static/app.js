@@ -61,7 +61,12 @@ const state = {
   // 인증 관련 상태
   isAuthenticated: false,
   currentUser: null,
-  authToken: localStorage.getItem('authToken') || null
+  authToken: localStorage.getItem('authToken') || null,
+  dynamicCategories: {
+    income: [],
+    expense: [],
+    savings: []
+  }
 };
 
 function getCurrentWallet() {
@@ -160,6 +165,33 @@ function getCategories() {
 
 // Dynamic categories based on current language
 const categories = getCategories();
+
+function mergeCategoryLists(...lists) {
+  const merged = [];
+  const seen = new Set();
+
+  lists.flat().forEach(category => {
+    if (!category || typeof category !== 'string') return;
+    const trimmed = category.trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    merged.push(trimmed);
+  });
+
+  return merged;
+}
+
+function getCategoryOptions(type) {
+  return mergeCategoryLists(categories[type] || [], state.dynamicCategories?.[type] || []);
+}
+
+function getAllCategoryOptions() {
+  return mergeCategoryLists(
+    getCategoryOptions('income'),
+    getCategoryOptions('expense'),
+    getCategoryOptions('savings')
+  );
+}
 
 // 통화 정의
 
@@ -1539,6 +1571,7 @@ async function renderApp() {
   
   // 설정 로드 및 초기 뷰 렌더링
   await fetchSettings();
+  await fetchCategoryOptions();
   await switchView('home');
   setTimeout(() => {
     checkFixedExpenseReminders();
@@ -1584,6 +1617,22 @@ async function fetchSavingsAccounts() {
       state.savingsAccounts = response.data.data;
     }
   } catch (error) {}
+}
+
+async function fetchCategoryOptions() {
+  try {
+    const response = await axios.get('/api/categories');
+    if (response.data.success) {
+      state.dynamicCategories = {
+        income: response.data.data?.income || [],
+        expense: response.data.data?.expense || [],
+        savings: response.data.data?.savings || []
+      };
+    }
+  } catch (error) {
+    console.error('Failed to fetch categories:', error);
+    state.dynamicCategories = { income: [], expense: [], savings: [] };
+  }
 }
 
 async function fetchWalletAccounts() {
@@ -1771,6 +1820,7 @@ async function fetchBudgetVsSpending(yearMonth) {
 
 async function switchView(view) {
   state.activeView = view;
+  await fetchCategoryOptions();
   
   // 모든 탭 버튼 업데이트
   const tabs = ['home', 'month', 'week', 'savings', 'wallet', 'fixed-expenses', 'budgets', 'investments', 'receipts', 'debts', 'reports', 'settings'];
@@ -2009,11 +2059,29 @@ function drawHomeCategoryChart(expenseByCategory, categoryBudgetMap, hasBudgets)
   if (!canvas) return;
   
   const ctx = canvas.getContext('2d');
-  const categories = Object.keys(expenseByCategory).sort((a, b) => expenseByCategory[b] - expenseByCategory[a]);
+  const chartCategories = mergeCategoryLists(
+    Object.keys(expenseByCategory || {}),
+    hasBudgets ? Object.keys(categoryBudgetMap || {}) : [],
+    state.dynamicCategories?.expense || []
+  ).sort((a, b) => {
+    const aValue = Math.max(Number(expenseByCategory?.[a] || 0), Number(categoryBudgetMap?.[a] || 0));
+    const bValue = Math.max(Number(expenseByCategory?.[b] || 0), Number(categoryBudgetMap?.[b] || 0));
+    if (bValue !== aValue) return bValue - aValue;
+    return translateCategoryName(a).localeCompare(translateCategoryName(b));
+  });
+
+  if (chartCategories.length === 0) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.font = '14px sans-serif';
+    ctx.fillStyle = '#94A3B8';
+    ctx.textAlign = 'center';
+    ctx.fillText(t('transaction.no_spending'), canvas.width / 2, canvas.height / 2);
+    return;
+  }
   
   const datasets = [{
     label: t('home.actual_spending'),
-    data: categories.map(cat => expenseByCategory[cat]),
+    data: chartCategories.map(cat => expenseByCategory[cat] || 0),
     backgroundColor: 'rgba(239, 68, 68, 0.7)',
     borderColor: 'rgba(239, 68, 68, 1)',
     borderWidth: 1
@@ -2023,7 +2091,7 @@ function drawHomeCategoryChart(expenseByCategory, categoryBudgetMap, hasBudgets)
   if (hasBudgets && Object.keys(categoryBudgetMap).length > 0) {
     datasets.push({
       label: t('home.budget'),
-      data: categories.map(cat => categoryBudgetMap[cat] || 0),
+      data: chartCategories.map(cat => categoryBudgetMap[cat] || 0),
       backgroundColor: 'rgba(59, 130, 246, 0.7)',
       borderColor: 'rgba(59, 130, 246, 1)',
       borderWidth: 1
@@ -2033,7 +2101,7 @@ function drawHomeCategoryChart(expenseByCategory, categoryBudgetMap, hasBudgets)
   new Chart(ctx, {
     type: 'bar',
     data: {
-      labels: categories,
+      labels: chartCategories.map(cat => translateCategoryName(cat)),
       datasets: datasets
     },
     options: {
@@ -2279,7 +2347,7 @@ async function renderMonthView() {
           
           <select id="filter-category" class="px-4 py-2 border rounded" onchange="filterTransactions()">
             <option value="">${t('transaction.all_categories')}</option>
-            ${Object.values(categories).flat().map(cat => `<option value="${cat}">${cat}</option>`).join('')}
+            ${getAllCategoryOptions().map(cat => `<option value="${cat}">${translateCategoryName(cat)}</option>`).join('')}
           </select>
         </div>
         
@@ -3849,7 +3917,7 @@ async function renderBudgetsView() {
       </div>
       
       <div class="space-y-4">
-        ${categories.expense.map(category => {
+        ${getCategoryOptions('expense').map(category => {
           // 카테고리를 한글로 정규화하여 DB 데이터와 비교
           const normalizedCat = normalizeCategory(category);
           const budget = state.budgets.find(b => b.category === normalizedCat);
@@ -3858,7 +3926,7 @@ async function renderBudgetsView() {
           
           return `
             <div class="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
-              <label class="flex-1 font-medium">${category}</label>
+              <label class="flex-1 font-medium">${translateCategoryName(category)}</label>
               <input 
                 type="number" 
                 value="${budgetAmount}" 
@@ -4352,8 +4420,8 @@ async function openEditTransactionModal(transactionId) {
             <label class="block text-sm font-medium mb-2">카테고리</label>
             <select name="category" required class="w-full px-4 py-2 border rounded" 
                     id="edit-category-${transactionId}">
-              ${(categories[transaction.type] || []).map(cat => 
-                `<option value="${cat}" ${cat === transaction.category ? 'selected' : ''}>${cat}</option>`
+              ${getCategoryOptions(transaction.type).map(cat => 
+                `<option value="${cat}" ${cat === transaction.category ? 'selected' : ''}>${translateCategoryName(cat)}</option>`
               ).join('')}
             </select>
           </div>
@@ -4418,8 +4486,8 @@ function setEditTransactionType(type, transactionId) {
   
   // 카테고리 업데이트
   const categorySelect = document.getElementById(`edit-category-${transactionId}`);
-  categorySelect.innerHTML = (categories[type] || [])
-    .map(cat => `<option value="${cat}">${cat}</option>`)
+  categorySelect.innerHTML = getCategoryOptions(type)
+    .map(cat => `<option value="${cat}">${translateCategoryName(cat)}</option>`)
     .join('');
   
   // 저축 통장 선택 표시/숨김
@@ -6338,8 +6406,8 @@ async function openTransactionModal(date) {
           <div>
             <label class="block text-sm font-medium mb-2">${t('transaction.category')}</label>
             <select name="category" class="w-full px-4 py-2 border rounded" required>
-              ${(categories[state.currentTransactionType] || []).map(cat => 
-                `<option value="${cat}">${cat}</option>`
+              ${getCategoryOptions(state.currentTransactionType).map(cat => 
+                `<option value="${cat}">${translateCategoryName(cat)}</option>`
               ).join('')}
             </select>
           </div>
@@ -6874,7 +6942,7 @@ function openFixedExpenseModal() {
           <div>
             <label class="block text-sm font-medium mb-2">${t('transaction.category')}</label>
             <select name="category" class="w-full px-4 py-2 border rounded" required>
-              ${categories.expense.map(cat => `<option value="${cat}">${cat}</option>`).join('')}
+              ${getCategoryOptions('expense').map(cat => `<option value="${cat}">${translateCategoryName(cat)}</option>`).join('')}
             </select>
           </div>
           <div>
@@ -7875,7 +7943,7 @@ function openEditFixedExpenseModal(expenseData) {
           <div>
             <label class="block text-sm font-medium mb-1">${t('transaction.category')}</label>
             <select name="category" required class="w-full px-4 py-2 border rounded">
-              ${categories.expense.map(cat => `<option value="${cat}" ${cat === expenseData.category ? 'selected' : ''}>${cat}</option>`).join('')}
+              ${getCategoryOptions('expense').map(cat => `<option value="${cat}" ${cat === expenseData.category ? 'selected' : ''}>${translateCategoryName(cat)}</option>`).join('')}
             </select>
           </div>
           <div>
@@ -8559,6 +8627,11 @@ if (typeof window.translateCategoryName !== 'function') {
       '통신비': t('category.expense.communication'),
       '보험': t('category.expense.insurance'),
       '기타지출': t('category.expense.other'),
+      'Living': t('category.expense.housing'),
+      'Entertainment': t('category.expense.culture'),
+      'Transport': t('category.expense.transport'),
+      'Food': t('category.expense.food'),
+      'Shopping': t('category.expense.shopping'),
       // 짧은 형식
       '식': t('category.expense.food'),
       '의': t('category.expense.clothing'),
@@ -8589,7 +8662,9 @@ if (typeof window.normalizeCategory !== 'function') {
       'Clothing': '의복비',
       'Food': '식비',
       'Housing': '주거비',
+      'Living': '주거비',
       'Transport': '교통비',
+      'Entertainment': '문화생활',
       'Culture': '문화생활',
       'Shopping': '쇼핑',
       'Medical': '의료비',
