@@ -1,9 +1,9 @@
 // Budget Lee - Service Worker
-// Version: 2.1.0 - Clean bundle
+// Version: 2.2.0 - Network-first app shell
 
-const CACHE_VERSION = 'budget-lee-v3';
-const STATIC_CACHE = 'budget-lee-static-v3';
-const DYNAMIC_CACHE = 'budget-lee-dynamic-v3';
+const CACHE_VERSION = 'budget-lee-v4';
+const STATIC_CACHE = 'budget-lee-static-v4';
+const DYNAMIC_CACHE = 'budget-lee-dynamic-v4';
 
 // 오프라인에서도 접근 가능한 정적 파일
 const STATIC_ASSETS = [
@@ -59,7 +59,49 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Fetch 이벤트 - 네트워크 우선, 캐시 폴백 전략
+function isHtmlRequest(request) {
+  return request.mode === 'navigate' || (request.headers.get('Accept') || '').includes('text/html');
+}
+
+function isAppShellAsset(url) {
+  return (
+    url.origin === self.location.origin &&
+    (
+      url.pathname === '/' ||
+      url.pathname.startsWith('/static/') ||
+      url.pathname === '/manifest.json' ||
+      url.pathname === '/sw.js' ||
+      /\.(png|ico|svg|webp|jpg|jpeg)$/.test(url.pathname)
+    )
+  );
+}
+
+async function networkFirst(request, fallbackCacheName = DYNAMIC_CACHE) {
+  try {
+    const networkResponse = await fetch(request);
+    if (networkResponse && networkResponse.status === 200) {
+      const responseClone = networkResponse.clone();
+      caches.open(fallbackCacheName).then((cache) => cache.put(request, responseClone));
+    }
+    return networkResponse;
+  } catch (error) {
+    const cachedResponse = await caches.match(request);
+    if (cachedResponse) {
+      return cachedResponse;
+    }
+
+    if (isHtmlRequest(request)) {
+      return (await caches.match('/')) || new Response('오프라인 상태입니다.', {
+        status: 503,
+        statusText: 'Service Unavailable'
+      });
+    }
+
+    throw error;
+  }
+}
+
+// Fetch 이벤트 - 앱 셸은 네트워크 우선, 나머지는 캐시 폴백
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
@@ -83,8 +125,13 @@ self.addEventListener('fetch', (event) => {
     );
     return;
   }
-  
-  // 정적 파일: Cache First, Network Fallback
+
+  if (isAppShellAsset(url) || isHtmlRequest(request)) {
+    event.respondWith(networkFirst(request, STATIC_CACHE));
+    return;
+  }
+
+  // 외부 정적 파일: Cache First, Network Fallback
   event.respondWith(
     caches.match(request)
       .then((cachedResponse) => {
