@@ -1559,7 +1559,7 @@ app.get('/api/settings', authMiddleware, async (c) => {
   let result = await DB.prepare(`
     SELECT * FROM settings
     WHERE ${settingsScope.clause}
-    ORDER BY CASE WHEN user_id = ? THEN 0 ELSE 1 END, updated_at DESC, id DESC
+    ORDER BY CASE WHEN user_id = ? THEN 0 ELSE 1 END, created_at DESC, id DESC
     LIMIT 1
   `).bind(...settingsScope.bindings, userId?.toString()).first()
   
@@ -1583,9 +1583,16 @@ app.put('/api/settings', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
   const { currency, initial_balance, cash_on_hand, category_colors } = await c.req.json()
+  const settingsScope = buildUserIdClause('user_id', userId)
   
   // 설정이 없으면 생성
-  const existing = await DB.prepare(`SELECT id FROM settings WHERE user_id = ?`).bind(userId?.toString()).first()
+  const existing = await DB.prepare(`
+    SELECT id, user_id
+    FROM settings
+    WHERE ${settingsScope.clause}
+    ORDER BY CASE WHEN user_id = ? THEN 0 ELSE 1 END, created_at DESC, id DESC
+    LIMIT 1
+  `).bind(...settingsScope.bindings, userId?.toString()).first() as any
   
   if (!existing) {
     await DB.prepare(`
@@ -1601,14 +1608,15 @@ app.put('/api/settings', authMiddleware, async (c) => {
   } else {
     await DB.prepare(`
       UPDATE settings 
-      SET currency = ?, initial_balance = ?, cash_on_hand = ?, category_colors = ?
-      WHERE user_id = ?
+      SET currency = ?, initial_balance = ?, cash_on_hand = ?, category_colors = ?, user_id = ?
+      WHERE id = ?
     `).bind(
       currency, 
       initial_balance || 0, 
       cash_on_hand || 0, 
       category_colors ? JSON.stringify(category_colors) : null,
-      userId?.toString()
+      userId?.toString(),
+      existing.id
     ).run()
   }
   
