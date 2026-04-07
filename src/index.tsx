@@ -26,6 +26,7 @@ interface CacheEntry {
 }
 
 const memoryCache = new Map<string, CacheEntry>()
+const schemaCache = new Map<string, boolean>()
 
 function getCached(key: string): any | null {
   const entry = memoryCache.get(key)
@@ -44,6 +45,248 @@ function setCache(key: string, data: any, ttlSeconds: number = 60): void {
     data,
     expiry: Date.now() + (ttlSeconds * 1000)
   })
+}
+
+async function tableExists(DB: D1Database, tableName: string): Promise<boolean> {
+  const cacheKey = `table:${tableName}`
+  if (schemaCache.has(cacheKey)) {
+    return schemaCache.get(cacheKey) === true
+  }
+
+  const result = await DB.prepare(`
+    SELECT 1
+    FROM sqlite_master
+    WHERE type = 'table' AND name = ?
+  `).bind(tableName).first()
+
+  const exists = !!result
+  schemaCache.set(cacheKey, exists)
+  return exists
+}
+
+async function columnExists(DB: D1Database, tableName: string, columnName: string): Promise<boolean> {
+  const cacheKey = `column:${tableName}:${columnName}`
+  if (schemaCache.has(cacheKey)) {
+    return schemaCache.get(cacheKey) === true
+  }
+
+  const result = await DB.prepare(`
+    SELECT 1
+    FROM pragma_table_info(?)
+    WHERE name = ?
+  `).bind(tableName, columnName).first()
+
+  const exists = !!result
+  schemaCache.set(cacheKey, exists)
+  return exists
+}
+
+async function hasPersonalAccountLinking(DB: D1Database): Promise<boolean> {
+  const [hasAccountsTable, hasAccountIdColumn] = await Promise.all([
+    tableExists(DB, 'accounts'),
+    columnExists(DB, 'transactions', 'account_id')
+  ])
+
+  return hasAccountsTable && hasAccountIdColumn
+}
+
+function inferWalletAccountType(row: any): string {
+  const icon = String(row?.icon || '')
+  const name = String(row?.name || '').toLowerCase()
+  const bankName = String(row?.bank_name || '').toLowerCase()
+
+  if (icon.includes('💳') || name.includes('card') || name.includes('카드') || bankName.includes('card') || bankName.includes('카드')) {
+    return 'credit_card'
+  }
+  if (icon.includes('💵') || icon.includes('💰') || name.includes('cash') || name.includes('현금')) {
+    return 'cash'
+  }
+  if (Number(row?.savings_goal || 0) > 0 || icon.includes('🐷') || name.includes('saving') || name.includes('저축') || name.includes('적금')) {
+    return 'savings'
+  }
+
+  return 'checking'
+}
+
+function getWalletAccountIcon(type: string): string {
+  if (type === 'credit_card') return '💳'
+  if (type === 'cash') return '💵'
+  if (type === 'savings') return '🐷'
+  return '🏦'
+}
+
+function mapSharedWalletAccount(row: any): any {
+  const type = inferWalletAccountType(row)
+
+  return {
+    id: row.id,
+    wallet_id: row.shared_wallet_id,
+    name: row.name,
+    type,
+    balance: Number(row.balance || 0),
+    currency: 'KRW',
+    is_active: row.is_active,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    bank_name: row.bank_name,
+    description: row.description,
+    icon: row.icon || getWalletAccountIcon(type),
+    color: row.color || '#3B82F6',
+    savings_goal: Number(row.savings_goal || 0)
+  }
+}
+
+async function getAccessibleWallets(DB: D1Database, userId: number): Promise<any[]> {
+  const result = await DB.prepare(`
+    SELECT
+      sw.id,
+      sw.name,
+      sw.description,
+      sw.current_balance,
+      sw.total_savings,
+      sw.total_expenses,
+      sw.owner_user_id,
+      sw.invite_code,
+      sw.is_active,
+      sw.created_at,
+      sw.updated_at,
+      COUNT(DISTINCT swa.id) AS account_count,
+      COUNT(DISTINCT swm.user_id) AS member_count
+    FROM shared_wallets sw
+    LEFT JOIN shared_wallet_accounts swa ON swa.shared_wallet_id = sw.id AND swa.is_active = 1
+    LEFT JOIN shared_wallet_members swm ON swm.shared_wallet_id = sw.id
+    WHERE sw.is_active = 1
+      AND (
+        sw.owner_user_id = ?
+        OR EXISTS (
+          SELECT 1
+          FROM shared_wallet_members member
+          WHERE member.shared_wallet_id = sw.id
+            AND member.user_id = ?
+        )
+      )
+    GROUP BY sw.id
+    ORDER BY sw.updated_at DESC, sw.id DESC
+  `).bind(userId, userId).all()
+
+  return (result.results || []).map((wallet: any) => ({
+    ...wallet,
+    current_balance: Number(wallet.current_balance || 0),
+    total_savings: Number(wallet.total_savings || 0),
+    total_expenses: Number(wallet.total_expenses || 0),
+    account_count: Number(wallet.account_count || 0),
+    member_count: Number(wallet.member_count || 0)
+  }))
+}
+
+async function getAccessibleWallet(DB: D1Database, userId: number, walletId: number | null = null): Promise<any | null> {
+  const wallets = await getAccessibleWallets(DB, userId)
+  if (wallets.length === 0) return null
+  if (!walletId) return wallets[0]
+  return wallets.find((wallet: any) => Number(wallet.id) === Number(walletId)) || null
+}
+
+async function validateOwnedActiveAccount(DB: D1Database, userId: number, accountId: number | null, walletId: number | null = null): Promise<any | null> {
+  if (!accountId) return null
+
+  if (await hasPersonalAccountLinking(DB)) {
+    return await DB.prepare(`
+      SELECT id, user_id, name, type, balance, currency
+      FROM accounts
+      WHERE id = ? AND user_id = ? AND is_active = 1
+    `).bind(accountId, userId).first() as any
+  }
+
+  const wallet = await getAccessibleWallet(DB, userId, walletId)
+  if (!wallet) return null
+
+  const account = await DB.prepare(`
+    SELECT *
+    FROM shared_wallet_accounts
+    WHERE id = ? AND shared_wallet_id = ? AND is_active = 1
+  `).bind(accountId, wallet.id).first() as any
+
+  return account ? mapSharedWalletAccount(account) : null
+}
+
+function buildAccountBalanceAdjustmentStatement(
+  DB: D1Database,
+  userId: number,
+  accountId: number,
+  delta: number,
+  walletId: number | null = null
+): D1PreparedStatement {
+  if (!walletId) {
+    return DB.prepare(`
+      UPDATE accounts
+      SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND user_id = ?
+    `).bind(delta, accountId, userId)
+  }
+
+  return DB.prepare(`
+    UPDATE shared_wallet_accounts
+    SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND shared_wallet_id = ?
+  `).bind(delta, accountId, walletId)
+}
+
+async function ensureSharedWalletTransfersTable(DB: D1Database): Promise<void> {
+  await DB.batch([
+    DB.prepare(`
+      CREATE TABLE IF NOT EXISTS shared_wallet_transfers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        shared_wallet_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        from_account_id INTEGER NOT NULL,
+        to_account_id INTEGER NOT NULL,
+        amount REAL NOT NULL,
+        description TEXT,
+        transfer_date DATE NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (shared_wallet_id) REFERENCES shared_wallets(id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (from_account_id) REFERENCES shared_wallet_accounts(id) ON DELETE CASCADE,
+        FOREIGN KEY (to_account_id) REFERENCES shared_wallet_accounts(id) ON DELETE CASCADE
+      )
+    `),
+    DB.prepare(`CREATE INDEX IF NOT EXISTS idx_shared_wallet_transfers_wallet_id ON shared_wallet_transfers(shared_wallet_id)`),
+    DB.prepare(`CREATE INDEX IF NOT EXISTS idx_shared_wallet_transfers_date ON shared_wallet_transfers(transfer_date)`)
+  ])
+
+  schemaCache.set('table:shared_wallet_transfers', true)
+}
+
+async function recalcSharedWalletSummary(DB: D1Database, walletId: number): Promise<void> {
+  const accountSummary = await DB.prepare(`
+    SELECT
+      COALESCE(SUM(balance), 0) AS current_balance,
+      COALESCE(SUM(CASE WHEN savings_goal > 0 THEN balance ELSE 0 END), 0) AS total_savings
+    FROM shared_wallet_accounts
+    WHERE shared_wallet_id = ? AND is_active = 1
+  `).bind(walletId).first() as any
+
+  const expenseSummary = await DB.prepare(`
+    SELECT
+      COALESCE(SUM(amount), 0) AS total_expenses
+    FROM shared_wallet_transactions
+    WHERE shared_wallet_id = ?
+      AND type IN ('expense', 'withdrawal', 'purchase')
+  `).bind(walletId).first() as any
+
+  await DB.prepare(`
+    UPDATE shared_wallets
+    SET current_balance = ?,
+        total_savings = ?,
+        total_expenses = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).bind(
+    Number(accountSummary?.current_balance || 0),
+    Number(accountSummary?.total_savings || 0),
+    Number(expenseSummary?.total_expenses || 0),
+    walletId
+  ).run()
 }
 
 // 월별 통계 요약 재계산 (성능 최적화)
@@ -84,6 +327,17 @@ async function recalcMonthlySummary(DB: D1Database, userId: number, yearMonth: s
   console.log(`[Cache] Monthly summary updated: ${yearMonth} for user ${userId}`)
 }
 
+function getTransactionAccountDelta(type: string, amount: number): number {
+  return type === 'income' ? amount : -amount
+}
+
+function normalizeOptionalInteger(value: unknown): number | null {
+  if (value === undefined || value === null || value === '') return null
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return null
+  return parsed
+}
+
 // CORS 활성화
 app.use('/api/*', cors())
 
@@ -103,7 +357,6 @@ app.use('/api/*', async (c, next) => {
 
 // 정적 파일 서빙
 app.use('/static/*', serveStatic({ root: './' }))
-app.use('/vendor/*', serveStatic({ root: './' }))
 
 // ========== 인증 유틸리티 함수 ==========
 
@@ -377,21 +630,6 @@ app.get('/api/auth/me', authMiddleware, async (c) => {
     return c.json({ 
       success: true, 
       user: { id: 1, username: 'guest', name: 'Guest User', isGuest: true } 
-    })
-  }
-
-  // Legacy session-based users may have data without a row in `users`.
-  // Treat them as valid guest sessions so existing data remains reachable.
-  if (typeof username === 'string' && username.startsWith('session_')) {
-    return c.json({
-      success: true,
-      user: {
-        id: userId,
-        username,
-        name: 'Guest Session',
-        isGuest: true,
-        isSession: true
-      }
     })
   }
   
@@ -738,27 +976,6 @@ app.post('/api/auth/logout', async (c) => {
 app.get('/api/auth/me', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
-  const username = c.get('username')
-
-  if (!userId || userId === 1) {
-    return c.json({
-      success: true,
-      user: { id: 1, username: 'guest', name: 'Guest User', isGuest: true }
-    })
-  }
-
-  if (typeof username === 'string' && username.startsWith('session_')) {
-    return c.json({
-      success: true,
-      user: {
-        id: userId,
-        username,
-        name: 'Guest Session',
-        isGuest: true,
-        isSession: true
-      }
-    })
-  }
   
   const user = await DB.prepare(`
     SELECT id, username, name, created_at, last_login FROM users WHERE id = ?
@@ -882,13 +1099,16 @@ app.get('/api/transactions', authMiddleware, async (c) => {
   const startDate = c.req.query('start_date')
   const endDate = c.req.query('end_date')
   const type = c.req.query('type')
+  const accountLinkingEnabled = await hasPersonalAccountLinking(DB)
   
   let query = `
     SELECT 
       t.*,
-      sa.name as savings_account_name
+      sa.name as savings_account_name,
+      ${accountLinkingEnabled ? 'a.name as account_name, a.type as account_type' : 'NULL as account_name, NULL as account_type'}
     FROM transactions t
     LEFT JOIN savings_accounts sa ON t.savings_account_id = sa.id
+    ${accountLinkingEnabled ? 'LEFT JOIN accounts a ON t.account_id = a.id' : ''}
     WHERE t.user_id = ?
   `
   const params: any[] = [userId?.toString()]
@@ -917,13 +1137,16 @@ app.get('/api/transactions/date/:date', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
   const date = c.req.param('date')
+  const accountLinkingEnabled = await hasPersonalAccountLinking(DB)
   
   const result = await DB.prepare(`
     SELECT 
       t.*,
-      sa.name as savings_account_name
+      sa.name as savings_account_name,
+      ${accountLinkingEnabled ? 'a.name as account_name, a.type as account_type' : 'NULL as account_name, NULL as account_type'}
     FROM transactions t
     LEFT JOIN savings_accounts sa ON t.savings_account_id = sa.id
+    ${accountLinkingEnabled ? 'LEFT JOIN accounts a ON t.account_id = a.id' : ''}
     WHERE t.date = ? AND t.user_id = ?
     ORDER BY t.created_at DESC
   `).bind(date, userId?.toString()).all()
@@ -935,7 +1158,8 @@ app.get('/api/transactions/date/:date', authMiddleware, async (c) => {
 app.post('/api/transactions', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
-  const { type, category, amount, description, date, payment_method, savings_account_id } = await c.req.json()
+  const { type, category, amount, description, date, payment_method, savings_account_id, account_id } = await c.req.json()
+  const accountLinkingEnabled = await hasPersonalAccountLinking(DB)
   
   if (!type || !category || !amount || !date) {
     return c.json({ success: false, error: '필수 항목을 입력해주세요.' }, 400)
@@ -948,11 +1172,33 @@ app.post('/api/transactions', authMiddleware, async (c) => {
   if (type === 'savings' && !savings_account_id) {
     return c.json({ success: false, error: '저축 통장을 선택해주세요.' }, 400)
   }
+
+  const normalizedAccountId = accountLinkingEnabled ? normalizeOptionalInteger(account_id) : null
+  const linkedAccount = accountLinkingEnabled ? await validateOwnedActiveAccount(DB, userId as number, normalizedAccountId) : null
+  if (accountLinkingEnabled && normalizedAccountId && !linkedAccount) {
+    return c.json({ success: false, error: '연결 계좌를 찾을 수 없습니다.' }, 404)
+  }
   
-  const result = await DB.prepare(`
-    INSERT INTO transactions (type, category, amount, description, date, payment_method, savings_account_id, user_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).bind(type, category, amount, description || null, date, payment_method || 'card', savings_account_id || null, userId?.toString()).run()
+  const batch: D1PreparedStatement[] = [
+    accountLinkingEnabled
+      ? DB.prepare(`
+          INSERT INTO transactions (type, category, amount, description, date, payment_method, savings_account_id, account_id, user_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(type, category, amount, description || null, date, payment_method || 'card', savings_account_id || null, normalizedAccountId, userId?.toString())
+      : DB.prepare(`
+          INSERT INTO transactions (type, category, amount, description, date, payment_method, savings_account_id, user_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(type, category, amount, description || null, date, payment_method || 'card', savings_account_id || null, userId?.toString())
+  ]
+
+  if (normalizedAccountId) {
+    batch.push(
+      buildAccountBalanceAdjustmentStatement(DB, userId as number, normalizedAccountId, getTransactionAccountDelta(type, amount))
+    )
+  }
+
+  const results = await DB.batch(batch)
+  const result = results[0]
   
   // 월별 통계 캐시 업데이트
   const yearMonth = date.substring(0, 7) // 'YYYY-MM'
@@ -961,12 +1207,100 @@ app.post('/api/transactions', authMiddleware, async (c) => {
   return c.json({ success: true, id: result.meta.last_row_id })
 })
 
+app.post('/api/transactions/bulk-update', authMiddleware, async (c) => {
+  const { DB } = c.env
+  const userId = c.get('userId')
+  const { transaction_ids, payment_method, account_id } = await c.req.json()
+  const validPaymentMethods = ['card', 'cash', 'transfer']
+  const accountLinkingEnabled = await hasPersonalAccountLinking(DB)
+
+  if (!Array.isArray(transaction_ids) || transaction_ids.length === 0) {
+    return c.json({ success: false, error: '수정할 거래를 선택해주세요.' }, 400)
+  }
+
+  const normalizedIds = transaction_ids
+    .map((value: unknown) => Number(value))
+    .filter((value: number) => Number.isInteger(value) && value > 0)
+
+  if (normalizedIds.length === 0) {
+    return c.json({ success: false, error: '유효한 거래를 선택해주세요.' }, 400)
+  }
+
+  const normalizedAccountId = accountLinkingEnabled ? normalizeOptionalInteger(account_id) : null
+  if (payment_method && !validPaymentMethods.includes(payment_method)) {
+    return c.json({ success: false, error: '유효하지 않은 결제수단입니다.' }, 400)
+  }
+  if (accountLinkingEnabled && normalizedAccountId) {
+    const linkedAccount = await validateOwnedActiveAccount(DB, userId as number, normalizedAccountId)
+    if (!linkedAccount) {
+      return c.json({ success: false, error: '연결 계좌를 찾을 수 없습니다.' }, 404)
+    }
+  }
+
+  if (!payment_method && normalizedAccountId === null) {
+    return c.json({ success: false, error: '변경할 결제수단 또는 연결 계좌를 선택해주세요.' }, 400)
+  }
+
+  const placeholders = normalizedIds.map(() => '?').join(', ')
+  const transactionsResult = await DB.prepare(`
+    SELECT id, type, amount, ${accountLinkingEnabled ? 'account_id' : 'NULL as account_id'}, payment_method
+    FROM transactions
+    WHERE user_id = ? AND id IN (${placeholders})
+  `).bind(userId?.toString(), ...normalizedIds).all()
+
+  const transactions = (transactionsResult.results || []) as any[]
+  if (transactions.length === 0) {
+    return c.json({ success: false, error: '수정할 거래를 찾을 수 없습니다.' }, 404)
+  }
+
+  const batch: D1PreparedStatement[] = []
+
+  for (const transaction of transactions) {
+    const nextAccountId = normalizedAccountId === null ? transaction.account_id : normalizedAccountId
+    const nextPaymentMethod = payment_method || transaction.payment_method || 'card'
+
+    if (transaction.account_id && transaction.account_id !== nextAccountId) {
+      batch.push(
+        buildAccountBalanceAdjustmentStatement(DB, userId as number, transaction.account_id, -getTransactionAccountDelta(transaction.type, transaction.amount))
+      )
+    }
+
+    batch.push(
+      accountLinkingEnabled
+        ? DB.prepare(`
+            UPDATE transactions
+            SET payment_method = ?, account_id = ?
+            WHERE id = ? AND user_id = ?
+          `).bind(nextPaymentMethod, nextAccountId, transaction.id, userId?.toString())
+        : DB.prepare(`
+            UPDATE transactions
+            SET payment_method = ?
+            WHERE id = ? AND user_id = ?
+          `).bind(nextPaymentMethod, transaction.id, userId?.toString())
+    )
+
+    if (accountLinkingEnabled && nextAccountId && transaction.account_id !== nextAccountId) {
+      batch.push(
+        buildAccountBalanceAdjustmentStatement(DB, userId as number, nextAccountId, getTransactionAccountDelta(transaction.type, transaction.amount))
+      )
+    }
+  }
+
+  await DB.batch(batch)
+
+  return c.json({
+    success: true,
+    updated_count: transactions.length
+  })
+})
+
 // 2.4 거래 수정
 app.put('/api/transactions/:id', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
   const id = c.req.param('id')
-  const { type, category, amount, description, date, payment_method, savings_account_id } = await c.req.json()
+  const { type, category, amount, description, date, payment_method, savings_account_id, account_id } = await c.req.json()
+  const accountLinkingEnabled = await hasPersonalAccountLinking(DB)
   
   if (!type || !category || !amount || !date) {
     return c.json({ success: false, error: '필수 항목을 입력해주세요.' }, 400)
@@ -974,14 +1308,52 @@ app.put('/api/transactions/:id', authMiddleware, async (c) => {
   
   // 기존 거래 조회 (날짜 변경 감지용)
   const oldTransaction = await DB.prepare(`
-    SELECT date FROM transactions WHERE id = ? AND user_id = ?
+    SELECT date, type, amount, ${accountLinkingEnabled ? 'account_id' : 'NULL as account_id'} FROM transactions WHERE id = ? AND user_id = ?
   `).bind(id, userId?.toString()).first() as any
+
+  if (!oldTransaction) {
+    return c.json({ success: false, error: '거래를 찾을 수 없습니다.' }, 404)
+  }
+
+  if (type === 'savings' && !savings_account_id) {
+    return c.json({ success: false, error: '저축 통장을 선택해주세요.' }, 400)
+  }
+
+  const normalizedAccountId = accountLinkingEnabled ? normalizeOptionalInteger(account_id) : null
+  const linkedAccount = accountLinkingEnabled ? await validateOwnedActiveAccount(DB, userId as number, normalizedAccountId) : null
+  if (accountLinkingEnabled && normalizedAccountId && !linkedAccount) {
+    return c.json({ success: false, error: '연결 계좌를 찾을 수 없습니다.' }, 404)
+  }
   
-  await DB.prepare(`
-    UPDATE transactions 
-    SET type = ?, category = ?, amount = ?, description = ?, date = ?, payment_method = ?, savings_account_id = ?
-    WHERE id = ? AND user_id = ?
-  `).bind(type, category, amount, description || null, date, payment_method || 'card', savings_account_id || null, id, userId?.toString()).run()
+  const batch: D1PreparedStatement[] = []
+
+  if (oldTransaction.account_id) {
+    batch.push(
+      buildAccountBalanceAdjustmentStatement(DB, userId as number, oldTransaction.account_id, -getTransactionAccountDelta(oldTransaction.type, oldTransaction.amount))
+    )
+  }
+
+  batch.push(
+    accountLinkingEnabled
+      ? DB.prepare(`
+          UPDATE transactions 
+          SET type = ?, category = ?, amount = ?, description = ?, date = ?, payment_method = ?, savings_account_id = ?, account_id = ?
+          WHERE id = ? AND user_id = ?
+        `).bind(type, category, amount, description || null, date, payment_method || 'card', savings_account_id || null, normalizedAccountId, id, userId?.toString())
+      : DB.prepare(`
+          UPDATE transactions 
+          SET type = ?, category = ?, amount = ?, description = ?, date = ?, payment_method = ?, savings_account_id = ?
+          WHERE id = ? AND user_id = ?
+        `).bind(type, category, amount, description || null, date, payment_method || 'card', savings_account_id || null, id, userId?.toString())
+  )
+
+  if (accountLinkingEnabled && normalizedAccountId) {
+    batch.push(
+      buildAccountBalanceAdjustmentStatement(DB, userId as number, normalizedAccountId, getTransactionAccountDelta(type, amount))
+    )
+  }
+
+  await DB.batch(batch)
   
   // 월별 통계 캐시 업데이트 (기존 월 + 새 월)
   const yearMonth = date.substring(0, 7)
@@ -1002,13 +1374,30 @@ app.delete('/api/transactions/:id', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
   const id = c.req.param('id')
+  const accountLinkingEnabled = await hasPersonalAccountLinking(DB)
   
   // 삭제 전 날짜 조회 (캐시 업데이트용)
   const transaction = await DB.prepare(`
-    SELECT date FROM transactions WHERE id = ? AND user_id = ?
+    SELECT date, type, amount, ${accountLinkingEnabled ? 'account_id' : 'NULL as account_id'} FROM transactions WHERE id = ? AND user_id = ?
   `).bind(id, userId?.toString()).first() as any
-  
-  await DB.prepare(`DELETE FROM transactions WHERE id = ? AND user_id = ?`).bind(id, userId?.toString()).run()
+
+  if (!transaction) {
+    return c.json({ success: false, error: '거래를 찾을 수 없습니다.' }, 404)
+  }
+
+  const batch: D1PreparedStatement[] = []
+
+  if (transaction.account_id) {
+    batch.push(
+      buildAccountBalanceAdjustmentStatement(DB, userId as number, transaction.account_id, -getTransactionAccountDelta(transaction.type, transaction.amount))
+    )
+  }
+
+  batch.push(
+    DB.prepare(`DELETE FROM transactions WHERE id = ? AND user_id = ?`).bind(id, userId?.toString())
+  )
+
+  await DB.batch(batch)
   
   // 월별 통계 캐시 업데이트
   if (transaction?.date) {
@@ -1208,14 +1597,18 @@ app.get('/api/fixed-expenses', authMiddleware, async (c) => {
 app.post('/api/fixed-expenses', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
-  const { name, category, amount, frequency, week_of_month, day_of_week, payment_day } = await c.req.json()
+  const { name, category, amount, frequency, week_of_month, day_of_week, payment_day, month_of_year } = await c.req.json()
   
   if (!name || !category || !amount || !frequency) {
     return c.json({ success: false, error: '필수 항목을 입력해주세요.' }, 400)
   }
   
-  if (!['monthly', 'weekly', 'monthly_day'].includes(frequency)) {
+  if (!['daily', 'weekly', 'monthly', 'monthly_day', 'yearly'].includes(frequency)) {
     return c.json({ success: false, error: '유효하지 않은 주기입니다.' }, 400)
+  }
+  
+  if (frequency === 'daily') {
+    // 추가 입력값 필요 없음
   }
   
   // 'monthly' = 매월 특정 주/요일 (예: 매월 첫째 주 월요일)
@@ -1237,12 +1630,32 @@ app.post('/api/fixed-expenses', authMiddleware, async (c) => {
   if (frequency === 'weekly' && day_of_week === undefined) {
     return c.json({ success: false, error: '요일을 선택해주세요.' }, 400)
   }
+
+  // 'yearly' = 매년 특정 월/일
+  if (frequency === 'yearly') {
+    if (!month_of_year) {
+      return c.json({ success: false, error: '월을 선택해주세요.' }, 400)
+    }
+    if (!payment_day) {
+      return c.json({ success: false, error: '일자를 선택해주세요.' }, 400)
+    }
+  }
   
   const result = await DB.prepare(`
     INSERT INTO fixed_expenses 
-    (name, category, amount, frequency, week_of_month, day_of_week, payment_day, is_active, user_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
-  `).bind(name, category, amount, frequency, week_of_month || null, day_of_week ?? null, payment_day || null, userId?.toString()).run()
+    (name, category, amount, frequency, week_of_month, day_of_week, payment_day, month_of_year, is_active, user_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+  `).bind(
+    name,
+    category,
+    amount,
+    frequency,
+    week_of_month || null,
+    day_of_week ?? null,
+    payment_day || null,
+    month_of_year || null,
+    userId?.toString()
+  ).run()
   
   return c.json({ success: true, id: result.meta.last_row_id })
 })
@@ -1252,14 +1665,18 @@ app.put('/api/fixed-expenses/:id', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
   const id = c.req.param('id')
-  const { name, category, amount, frequency, week_of_month, day_of_week, payment_day } = await c.req.json()
+  const { name, category, amount, frequency, week_of_month, day_of_week, payment_day, month_of_year } = await c.req.json()
   
   if (!name || !category || !amount || !frequency) {
     return c.json({ success: false, error: '필수 항목을 입력해주세요.' }, 400)
   }
   
-  if (!['monthly', 'weekly', 'monthly_day'].includes(frequency)) {
+  if (!['daily', 'weekly', 'monthly', 'monthly_day', 'yearly'].includes(frequency)) {
     return c.json({ success: false, error: '유효하지 않은 주기입니다.' }, 400)
+  }
+  
+  if (frequency === 'daily') {
+    // 추가 입력값 필요 없음
   }
   
   // 'monthly' = 매월 특정 주/요일 (예: 매월 첫째 주 월요일)
@@ -1281,13 +1698,33 @@ app.put('/api/fixed-expenses/:id', authMiddleware, async (c) => {
   if (frequency === 'weekly' && day_of_week === undefined) {
     return c.json({ success: false, error: '요일을 선택해주세요.' }, 400)
   }
+
+  if (frequency === 'yearly') {
+    if (!month_of_year) {
+      return c.json({ success: false, error: '월을 선택해주세요.' }, 400)
+    }
+    if (!payment_day) {
+      return c.json({ success: false, error: '일자를 선택해주세요.' }, 400)
+    }
+  }
   
   await DB.prepare(`
     UPDATE fixed_expenses 
     SET name = ?, category = ?, amount = ?, frequency = ?, 
-        week_of_month = ?, day_of_week = ?, payment_day = ?
+        week_of_month = ?, day_of_week = ?, payment_day = ?, month_of_year = ?
     WHERE id = ? AND user_id = ?
-  `).bind(name, category, amount, frequency, week_of_month || null, day_of_week ?? null, payment_day || null, id, userId?.toString()).run()
+  `).bind(
+    name,
+    category,
+    amount,
+    frequency,
+    week_of_month || null,
+    day_of_week ?? null,
+    payment_day || null,
+    month_of_year || null,
+    id,
+    userId?.toString()
+  ).run()
   
   return c.json({ success: true })
 })
@@ -1305,132 +1742,243 @@ app.delete('/api/fixed-expenses/:id', authMiddleware, async (c) => {
   return c.json({ success: true })
 })
 
-// 고정지출 지불 표시
-app.post('/api/fixed-expenses/:id/mark-paid', authMiddleware, async (c) => {
+async function payFixedExpense(DB: any, userId: string, fixedExpenseId: string, paymentDate: string) {
+  const expense = await DB.prepare(`
+    SELECT * FROM fixed_expenses WHERE id = ? AND user_id = ? AND is_active = 1
+  `).bind(fixedExpenseId, userId).first() as any
+
+  if (!expense) {
+    return { success: false, status: 404, error: '고정지출을 찾을 수 없습니다.' }
+  }
+
+  const existingPayment = await DB.prepare(`
+    SELECT id, transaction_id
+    FROM fixed_expense_payments
+    WHERE fixed_expense_id = ?
+      AND payment_date = ?
+      AND (user_id = ? OR user_id IS NULL)
+    ORDER BY id DESC
+    LIMIT 1
+  `).bind(fixedExpenseId, paymentDate, userId).first() as any
+
+  if (existingPayment) {
+    return {
+      success: true,
+      already_paid: true,
+      transaction_id: existingPayment.transaction_id || null
+    }
+  }
+
+  const transactionResult = await DB.prepare(`
+    INSERT INTO transactions
+    (type, category, amount, description, date, payment_method, user_id)
+    VALUES ('expense', ?, ?, ?, ?, 'card', ?)
+  `).bind(
+    expense.category,
+    expense.amount,
+    `${expense.name} (고정지출)`,
+    paymentDate,
+    userId
+  ).run()
+
+  const transactionId = transactionResult.meta.last_row_id
+
+  await DB.prepare(`
+    INSERT INTO fixed_expense_payments (fixed_expense_id, transaction_id, payment_date, user_id)
+    VALUES (?, ?, ?, ?)
+  `).bind(fixedExpenseId, transactionId, paymentDate, userId).run()
+
+  await recalcMonthlySummary(DB, userId as unknown as number, paymentDate.substring(0, 7))
+
+  return {
+    success: true,
+    transaction_id: transactionId,
+    expense
+  }
+}
+
+// 5.5 고정지출 지불 처리
+app.post('/api/fixed-expenses/:id/pay', authMiddleware, async (c) => {
   const { DB } = c.env
-  const userId = c.get('userId')
+  const userId = c.get('userId')!
   const id = c.req.param('id')
-  const { date } = await c.req.json()
-  
-  if (!date) {
+  const { payment_date } = await c.req.json()
+
+  if (!payment_date) {
     return c.json({ success: false, error: '날짜를 입력해주세요.' }, 400)
   }
-  
-  const existingPayment = await DB.prepare(`
-    SELECT id FROM fixed_expense_payments 
-    WHERE fixed_expense_id = ? AND payment_date = ?
-  `).bind(id, date).first()
-  
-  if (existingPayment) {
-    return c.json({ success: true }) // 이미 표시된 경우
+
+  const result = await payFixedExpense(DB, userId.toString(), id, payment_date)
+
+  if (!result.success) {
+    return c.json({ success: false, error: result.error }, result.status || 400)
   }
-  
-  // 지불 표시만 저장 (transaction_id는 null)
-  await DB.prepare(`
-    INSERT INTO fixed_expense_payments (fixed_expense_id, transaction_id, payment_date)
-    VALUES (?, NULL, ?)
-  `).bind(id, date).run()
-  
-  return c.json({ success: true })
+
+  return c.json({
+    success: true,
+    already_paid: !!result.already_paid,
+    transaction_id: result.transaction_id || null
+  })
 })
 
-// 5.5 고정지출 지불 표시 제거
+// 이전 호환성을 위한 alias
+app.post('/api/fixed-expenses/:id/mark-paid', authMiddleware, async (c) => {
+  const { DB } = c.env
+  const userId = c.get('userId')!
+  const id = c.req.param('id')
+  const { date, payment_date } = await c.req.json()
+  const targetDate = payment_date || date
+
+  if (!targetDate) {
+    return c.json({ success: false, error: '날짜를 입력해주세요.' }, 400)
+  }
+
+  const result = await payFixedExpense(DB, userId.toString(), id, targetDate)
+
+  if (!result.success) {
+    return c.json({ success: false, error: result.error }, result.status || 400)
+  }
+
+  return c.json({
+    success: true,
+    already_paid: !!result.already_paid,
+    transaction_id: result.transaction_id || null
+  })
+})
+
+// 5.6 고정지출 지불 처리 취소
 app.delete('/api/fixed-expenses/:id/mark-paid/:date', authMiddleware, async (c) => {
   const { DB } = c.env
+  const userId = c.get('userId')!
   const id = c.req.param('id')
   const date = c.req.param('date')
-  
+
+  const payment = await DB.prepare(`
+    SELECT id, transaction_id
+    FROM fixed_expense_payments
+    WHERE fixed_expense_id = ?
+      AND payment_date = ?
+      AND (user_id = ? OR user_id IS NULL)
+    ORDER BY id DESC
+    LIMIT 1
+  `).bind(id, date, userId.toString()).first() as any
+
+  if (!payment) {
+    return c.json({ success: true })
+  }
+
+  if (payment.transaction_id) {
+    await DB.prepare(`
+      DELETE FROM transactions
+      WHERE id = ? AND user_id = ?
+    `).bind(payment.transaction_id, userId.toString()).run()
+
+    await recalcMonthlySummary(DB, userId as unknown as number, date.substring(0, 7))
+  }
+
   await DB.prepare(`
-    DELETE FROM fixed_expense_payments 
-    WHERE fixed_expense_id = ? AND payment_date = ?
-  `).bind(id, date).run()
-  
+    DELETE FROM fixed_expense_payments
+    WHERE id = ?
+  `).bind(payment.id).run()
+
   return c.json({ success: true })
 })
 
 // 고정지출 반복 인스턴스 조회
 app.get('/api/fixed-expenses/instances/:yearMonth', authMiddleware, async (c) => {
   const { DB } = c.env
-  const userId = c.get('userId')
+  const userId = c.get('userId')!
   const yearMonth = c.req.param('yearMonth')
-  
-  // 모든 활성화된 고정지출 가져오기
+  const todayStr = formatDate(new Date())
+
   const fixedExpenses = await DB.prepare(`
-    SELECT * FROM fixed_expenses WHERE is_active = 1 AND user_id = ?
-  `).bind(userId?.toString()).all()
-  
-  // 해당 월의 모든 지불 내역 가져오기
+    SELECT * FROM fixed_expenses
+    WHERE is_active = 1 AND user_id = ?
+  `).bind(userId.toString()).all()
+
   const payments = await DB.prepare(`
-    SELECT 
-      fep.fixed_expense_id,
-      fep.payment_date,
-      fep.transaction_id
-    FROM fixed_expense_payments fep
-    WHERE strftime('%Y-%m', fep.payment_date) = ?
-  `).bind(yearMonth).all()
-  
+    SELECT fixed_expense_id, payment_date, transaction_id
+    FROM fixed_expense_payments
+    WHERE strftime('%Y-%m', payment_date) = ?
+      AND (user_id = ? OR user_id IS NULL)
+  `).bind(yearMonth, userId.toString()).all()
+
   const instances: any[] = []
   const [year, month] = yearMonth.split('-').map(Number)
-  
+
   for (const expense of fixedExpenses.results as any[]) {
-    if (expense.frequency === 'monthly') {
-      // 월별: 해당 월의 n번째 요일 계산
-      const date = getNthDayOfMonth(year, month - 1, expense.week_of_month, expense.day_of_week)
-      if (date) {
-        const dateStr = formatDate(date)
-        const payment = (payments.results as any[]).find(
-          p => p.fixed_expense_id === expense.id && p.payment_date === dateStr
-        )
-        
-        instances.push({
-          ...expense,
-          scheduled_date: dateStr,
-          is_paid: !!payment,
-          transaction_id: payment?.transaction_id || null
-        })
-      }
-    } else if (expense.frequency === 'monthly_day') {
-      // 매월 특정 일자
-      const day = expense.payment_day
-      const lastDay = new Date(year, month, 0).getDate()
-      const actualDay = Math.min(day, lastDay) // 31일이 없는 달 처리
-      const date = new Date(year, month - 1, actualDay)
-      const dateStr = formatDate(date)
+    const scheduledDates = getFixedExpenseDatesForMonth(expense, year, month)
+
+    for (const scheduledDate of scheduledDates) {
+      const dateStr = formatDate(scheduledDate)
       const payment = (payments.results as any[]).find(
         p => p.fixed_expense_id === expense.id && p.payment_date === dateStr
       )
-      
+
       instances.push({
         ...expense,
         scheduled_date: dateStr,
         is_paid: !!payment,
-        transaction_id: payment?.transaction_id || null
+        is_overdue: !payment && dateStr < todayStr,
+        is_due: !payment && dateStr <= todayStr,
+        transaction_id: payment?.transaction_id || null,
+        period_group: getFixedExpensePeriodGroup(expense.frequency)
       })
-    } else if (expense.frequency === 'weekly') {
-      // 주별: 해당 월의 첫 번째 해당 요일만 표시
-      const date = getFirstDayOfWeekInMonth(year, month - 1, expense.day_of_week)
-      
-      if (date) {
-        const dateStr = formatDate(date)
-        const payment = (payments.results as any[]).find(
-          p => p.fixed_expense_id === expense.id && p.payment_date === dateStr
-        )
-        
-        instances.push({
-          ...expense,
-          scheduled_date: dateStr,
-          is_paid: !!payment,
-          transaction_id: payment?.transaction_id || null
-        })
-      }
     }
   }
-  
-  // 날짜순 정렬
-  instances.sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date))
-  
+
+  instances.sort((a, b) => {
+    if (a.scheduled_date === b.scheduled_date) {
+      return a.name.localeCompare(b.name)
+    }
+    return a.scheduled_date.localeCompare(b.scheduled_date)
+  })
+
   return c.json({ success: true, data: instances })
 })
+
+function getFixedExpenseDatesForMonth(expense: any, year: number, month: number): Date[] {
+  const monthIndex = month - 1
+
+  if (expense.frequency === 'daily') {
+    const lastDay = new Date(year, month, 0).getDate()
+    return Array.from({ length: lastDay }, (_, index) => new Date(year, monthIndex, index + 1))
+  }
+
+  if (expense.frequency === 'weekly') {
+    return getAllDaysOfWeekInMonth(year, monthIndex, expense.day_of_week)
+  }
+
+  if (expense.frequency === 'monthly') {
+    const date = getNthDayOfMonth(year, monthIndex, expense.week_of_month, expense.day_of_week)
+    return date ? [date] : []
+  }
+
+  if (expense.frequency === 'monthly_day') {
+    const lastDay = new Date(year, month, 0).getDate()
+    const actualDay = Math.min(expense.payment_day, lastDay)
+    return [new Date(year, monthIndex, actualDay)]
+  }
+
+  if (expense.frequency === 'yearly') {
+    if (!expense.month_of_year || Number(expense.month_of_year) !== month) {
+      return []
+    }
+    const lastDay = new Date(year, month, 0).getDate()
+    const actualDay = Math.min(expense.payment_day, lastDay)
+    return [new Date(year, monthIndex, actualDay)]
+  }
+
+  return []
+}
+
+function getFixedExpensePeriodGroup(frequency: string): string {
+  if (frequency === 'daily') return 'daily'
+  if (frequency === 'weekly') return 'weekly'
+  if (frequency === 'yearly') return 'yearly'
+  return 'monthly'
+}
+
 function getNthDayOfMonth(year: number, month: number, weekOfMonth: number, dayOfWeek: number): Date | null {
   const firstDay = new Date(year, month, 1)
   const firstDayOfWeek = firstDay.getDay()
@@ -1449,6 +1997,19 @@ function getNthDayOfMonth(year: number, month: number, weekOfMonth: number, dayO
   }
   
   return targetDate
+}
+
+function getAllDaysOfWeekInMonth(year: number, month: number, dayOfWeek: number): Date[] {
+  const dates: Date[] = []
+  let current = getFirstDayOfWeekInMonth(year, month, dayOfWeek)
+
+  while (current && current.getMonth() === month) {
+    dates.push(new Date(current))
+    current = new Date(current)
+    current.setDate(current.getDate() + 7)
+  }
+
+  return dates
 }
 
 function getFirstDayOfWeekInMonth(year: number, month: number, dayOfWeek: number): Date | null {
@@ -1922,8 +2483,8 @@ app.get('/', (c) => {
     <!-- 모달들이 여기에 동적으로 추가됩니다 -->
     <div id="modal-container"></div>
 
-    <script src="/vendor/axios.min.js"></script>
-    <script src="/vendor/chart.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios@1.6.0/dist/axios.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="/static/i18n.js?v=${Date.now()}"></script>
     <script src="/static/app.js?v=${Date.now()}"></script>
     <script>
@@ -1964,44 +2525,222 @@ app.get('/', (c) => {
 </html>`)
 })
 
+// ========== 공유지갑(Wallets) API ==========
+
+app.get('/api/wallets', authMiddleware, async (c) => {
+  const { DB } = c.env
+  const userId = Number(c.get('userId') || 0)
+
+  try {
+    const wallets = await getAccessibleWallets(DB, userId)
+    return c.json({
+      success: true,
+      wallets,
+      current_wallet_id: wallets[0]?.id || null
+    })
+  } catch (error: any) {
+    console.error('[Wallets] List error:', error)
+    return c.json({ success: false, error: '공유지갑 조회 실패' }, 500)
+  }
+})
+
+app.post('/api/wallets', authMiddleware, async (c) => {
+  const { DB } = c.env
+  const userId = Number(c.get('userId') || 0)
+  const { name, description } = await c.req.json()
+
+  if (!name || !String(name).trim()) {
+    return c.json({ success: false, error: '공유지갑 이름을 입력해주세요.' }, 400)
+  }
+
+  try {
+    const inviteCode = Math.random().toString(36).slice(2, 8).toUpperCase()
+    const result = await DB.prepare(`
+      INSERT INTO shared_wallets (name, description, owner_user_id, invite_code, is_active)
+      VALUES (?, ?, ?, ?, 1)
+    `).bind(String(name).trim(), description ? String(description).trim() : null, userId, inviteCode).run()
+
+    const walletId = Number(result.meta.last_row_id)
+    await DB.prepare(`
+      INSERT OR IGNORE INTO shared_wallet_members (shared_wallet_id, user_id)
+      VALUES (?, ?)
+    `).bind(walletId, userId).run()
+
+    const wallet = await getAccessibleWallet(DB, userId, walletId)
+    return c.json({ success: true, wallet })
+  } catch (error: any) {
+    console.error('[Wallets] Create error:', error)
+    return c.json({ success: false, error: '공유지갑 생성 실패' }, 500)
+  }
+})
+
+// 공유지갑 내 거래 조회
+app.get('/api/wallet-transactions', authMiddleware, async (c) => {
+  const { DB } = c.env
+  const userId = Number(c.get('userId') || 0)
+  const walletId = normalizeOptionalInteger(c.req.query('wallet_id'))
+  const startDate = c.req.query('start_date')
+  const endDate = c.req.query('end_date')
+  const type = c.req.query('type')
+
+  try {
+    const wallet = await getAccessibleWallet(DB, userId, walletId)
+    if (!wallet) {
+      return c.json({ success: true, wallet: null, transactions: [] })
+    }
+
+    let query = `
+      SELECT
+        swt.*,
+        swa.name AS account_name,
+        swa.bank_name,
+        swa.icon,
+        swa.color,
+        swa.savings_goal
+      FROM shared_wallet_transactions swt
+      LEFT JOIN shared_wallet_accounts swa ON swa.id = swt.account_id
+      WHERE swt.shared_wallet_id = ?
+    `
+    const params: any[] = [wallet.id]
+
+    if (startDate) {
+      query += ` AND swt.transaction_date >= ?`
+      params.push(startDate)
+    }
+    if (endDate) {
+      query += ` AND swt.transaction_date <= ?`
+      params.push(endDate)
+    }
+    if (type) {
+      query += ` AND swt.type = ?`
+      params.push(type)
+    }
+
+    query += ` ORDER BY swt.transaction_date DESC, swt.created_at DESC`
+
+    const result = await DB.prepare(query).bind(...params).all()
+    const transactions = (result.results || []).map((row: any) => {
+      const accountType = row.account_name ? inferWalletAccountType(row) : null
+      const paymentMethod =
+        accountType === 'credit_card' ? 'card' :
+        accountType === 'cash' ? 'cash' :
+        row.type === 'expense' ? 'transfer' : 'transfer'
+
+      return {
+        ...row,
+        date: row.transaction_date,
+        account_type: accountType,
+        payment_method: paymentMethod,
+        savings_account_name: Number(row.savings_goal || 0) > 0 ? row.account_name : null
+      }
+    })
+
+    return c.json({ success: true, wallet, transactions })
+  } catch (error: any) {
+    console.error('[WalletTransactions] List error:', error)
+    return c.json({ success: false, error: '공유지갑 거래 조회 실패' }, 500)
+  }
+})
+
+app.post('/api/wallet-transactions/bulk-update', authMiddleware, async (c) => {
+  const { DB } = c.env
+  const userId = Number(c.get('userId') || 0)
+  const { wallet_id, transaction_ids, account_id } = await c.req.json()
+
+  if (!Array.isArray(transaction_ids) || transaction_ids.length === 0) {
+    return c.json({ success: false, error: '수정할 거래를 선택해주세요.' }, 400)
+  }
+
+  const wallet = await getAccessibleWallet(DB, userId, normalizeOptionalInteger(wallet_id))
+  if (!wallet) {
+    return c.json({ success: false, error: '공유지갑을 찾을 수 없습니다.' }, 404)
+  }
+
+  const normalizedIds = transaction_ids
+    .map((value: unknown) => Number(value))
+    .filter((value: number) => Number.isInteger(value) && value > 0)
+
+  const normalizedAccountId = normalizeOptionalInteger(account_id)
+  if (!normalizedAccountId) {
+    return c.json({ success: false, error: '연결할 계좌를 선택해주세요.' }, 400)
+  }
+
+  const account = await validateOwnedActiveAccount(DB, userId, normalizedAccountId, wallet.id)
+  if (!account) {
+    return c.json({ success: false, error: '연결 계좌를 찾을 수 없습니다.' }, 404)
+  }
+
+  const placeholders = normalizedIds.map(() => '?').join(', ')
+  const result = await DB.prepare(`
+    UPDATE shared_wallet_transactions
+    SET account_id = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE shared_wallet_id = ?
+      AND id IN (${placeholders})
+  `).bind(normalizedAccountId, wallet.id, ...normalizedIds).run()
+
+  return c.json({
+    success: true,
+    updated_count: Number(result.meta.changes || 0)
+  })
+})
+
 // ========== 계좌(Accounts) API ==========
 
-// 계좌 생성
 app.post('/api/accounts', authMiddleware, async (c) => {
   const { DB } = c.env
-  const userId = c.get('userId')!
-  const { name, type, balance = 0, currency = 'KRW' } = await c.req.json()
-  
-  // 입력 검증
+  const userId = Number(c.get('userId') || 0)
+  const { wallet_id, name, type, balance = 0, bank_name, description, savings_goal = 0 } = await c.req.json()
+
   if (!name || !type) {
     return c.json({ success: false, error: '계좌명과 유형을 입력해주세요.' }, 400)
   }
-  
-  // 유효한 계좌 유형 확인
+
   const validTypes = ['checking', 'savings', 'credit_card', 'cash']
   if (!validTypes.includes(type)) {
     return c.json({ success: false, error: '유효하지 않은 계좌 유형입니다.' }, 400)
   }
-  
+
+  const wallet = await getAccessibleWallet(DB, userId, normalizeOptionalInteger(wallet_id))
+  if (!wallet) {
+    return c.json({ success: false, error: '공유지갑을 찾을 수 없습니다.' }, 404)
+  }
+
   try {
     const result = await DB.prepare(`
-      INSERT INTO accounts (user_id, name, type, balance, currency)
-      VALUES (?, ?, ?, ?, ?)
-    `).bind(userId, name, type, balance, currency).run()
-    
-    const accountId = result.meta.last_row_id
-    
+      INSERT INTO shared_wallet_accounts (
+        shared_wallet_id,
+        name,
+        bank_name,
+        balance,
+        description,
+        icon,
+        color,
+        savings_goal
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      wallet.id,
+      String(name).trim(),
+      bank_name ? String(bank_name).trim() : null,
+      Number(balance || 0),
+      description ? String(description).trim() : null,
+      getWalletAccountIcon(type),
+      '#3B82F6',
+      Number(savings_goal || 0)
+    ).run()
+
+    const accountId = Number(result.meta.last_row_id)
+    await recalcSharedWalletSummary(DB, wallet.id)
+
+    const account = await DB.prepare(`
+      SELECT *
+      FROM shared_wallet_accounts
+      WHERE id = ?
+    `).bind(accountId).first() as any
+
     return c.json({
       success: true,
-      account: {
-        id: accountId,
-        user_id: userId,
-        name,
-        type,
-        balance,
-        currency,
-        is_active: 1
-      }
+      account: mapSharedWalletAccount(account)
     })
   } catch (error: any) {
     console.error('[Accounts] Create error:', error)
@@ -2009,31 +2748,37 @@ app.post('/api/accounts', authMiddleware, async (c) => {
   }
 })
 
-// 사용자의 모든 계좌 조회
 app.get('/api/accounts', authMiddleware, async (c) => {
   const { DB } = c.env
-  const userId = c.get('userId')!
+  const userId = Number(c.get('userId') || 0)
   const includeInactive = c.req.query('include_inactive') === 'true'
-  
+  const walletId = normalizeOptionalInteger(c.req.query('wallet_id'))
+
   try {
-    let query = `
-      SELECT id, user_id, name, type, balance, currency, is_active, 
-             created_at, updated_at
-      FROM accounts
-      WHERE user_id = ?
-    `
-    
-    if (!includeInactive) {
-      query += ' AND is_active = 1'
+    const wallet = await getAccessibleWallet(DB, userId, walletId)
+    if (!wallet) {
+      return c.json({ success: true, accounts: [], current_wallet_id: null })
     }
-    
-    query += ' ORDER BY created_at DESC'
-    
-    const result = await DB.prepare(query).bind(userId).all()
-    
+
+    let query = `
+      SELECT *
+      FROM shared_wallet_accounts
+      WHERE shared_wallet_id = ?
+    `
+    const params: any[] = [wallet.id]
+
+    if (!includeInactive) {
+      query += ` AND is_active = 1`
+    }
+
+    query += ` ORDER BY created_at ASC, id ASC`
+
+    const result = await DB.prepare(query).bind(...params).all()
+
     return c.json({
       success: true,
-      accounts: result.results || []
+      current_wallet_id: wallet.id,
+      accounts: (result.results || []).map((row: any) => mapSharedWalletAccount(row))
     })
   } catch (error: any) {
     console.error('[Accounts] List error:', error)
@@ -2041,27 +2786,36 @@ app.get('/api/accounts', authMiddleware, async (c) => {
   }
 })
 
-// 특정 계좌 상세 조회
 app.get('/api/accounts/:id', authMiddleware, async (c) => {
   const { DB } = c.env
-  const userId = c.get('userId')!
+  const userId = Number(c.get('userId') || 0)
   const accountId = parseInt(c.req.param('id'))
-  
+
   try {
     const account = await DB.prepare(`
-      SELECT id, user_id, name, type, balance, currency, is_active,
-             created_at, updated_at
-      FROM accounts
-      WHERE id = ? AND user_id = ?
-    `).bind(accountId, userId).first()
-    
+      SELECT swa.*, sw.id AS wallet_id
+      FROM shared_wallet_accounts swa
+      INNER JOIN shared_wallets sw ON sw.id = swa.shared_wallet_id
+      WHERE swa.id = ?
+        AND sw.is_active = 1
+        AND (
+          sw.owner_user_id = ?
+          OR EXISTS (
+            SELECT 1
+            FROM shared_wallet_members member
+            WHERE member.shared_wallet_id = sw.id
+              AND member.user_id = ?
+          )
+        )
+    `).bind(accountId, userId, userId).first() as any
+
     if (!account) {
       return c.json({ success: false, error: '계좌를 찾을 수 없습니다.' }, 404)
     }
-    
+
     return c.json({
       success: true,
-      account
+      account: mapSharedWalletAccount(account)
     })
   } catch (error: any) {
     console.error('[Accounts] Get error:', error)
@@ -2069,65 +2823,85 @@ app.get('/api/accounts/:id', authMiddleware, async (c) => {
   }
 })
 
-// 계좌 정보 수정
 app.put('/api/accounts/:id', authMiddleware, async (c) => {
   const { DB } = c.env
-  const userId = c.get('userId')!
+  const userId = Number(c.get('userId') || 0)
   const accountId = parseInt(c.req.param('id'))
-  const { name, type, balance, currency, is_active } = await c.req.json()
-  
+  const { name, type, balance, is_active, bank_name, description, savings_goal } = await c.req.json()
+
   try {
-    // 계좌 소유권 확인
     const account = await DB.prepare(`
-      SELECT id FROM accounts WHERE id = ? AND user_id = ?
-    `).bind(accountId, userId).first()
-    
+      SELECT swa.*, sw.id AS wallet_id
+      FROM shared_wallet_accounts swa
+      INNER JOIN shared_wallets sw ON sw.id = swa.shared_wallet_id
+      WHERE swa.id = ?
+        AND sw.is_active = 1
+        AND (
+          sw.owner_user_id = ?
+          OR EXISTS (
+            SELECT 1
+            FROM shared_wallet_members member
+            WHERE member.shared_wallet_id = sw.id
+              AND member.user_id = ?
+          )
+        )
+    `).bind(accountId, userId, userId).first() as any
+
     if (!account) {
       return c.json({ success: false, error: '계좌를 찾을 수 없습니다.' }, 404)
     }
-    
-    // 업데이트할 필드 동적 생성
+
     const updates: string[] = []
     const values: any[] = []
-    
+
     if (name !== undefined) {
       updates.push('name = ?')
-      values.push(name)
+      values.push(String(name).trim())
     }
     if (type !== undefined) {
       const validTypes = ['checking', 'savings', 'credit_card', 'cash']
       if (!validTypes.includes(type)) {
         return c.json({ success: false, error: '유효하지 않은 계좌 유형입니다.' }, 400)
       }
-      updates.push('type = ?')
-      values.push(type)
+      updates.push('icon = ?')
+      values.push(getWalletAccountIcon(type))
     }
     if (balance !== undefined) {
       updates.push('balance = ?')
-      values.push(balance)
+      values.push(Number(balance))
     }
-    if (currency !== undefined) {
-      updates.push('currency = ?')
-      values.push(currency)
+    if (bank_name !== undefined) {
+      updates.push('bank_name = ?')
+      values.push(bank_name ? String(bank_name).trim() : null)
+    }
+    if (description !== undefined) {
+      updates.push('description = ?')
+      values.push(description ? String(description).trim() : null)
+    }
+    if (savings_goal !== undefined) {
+      updates.push('savings_goal = ?')
+      values.push(Number(savings_goal || 0))
     }
     if (is_active !== undefined) {
       updates.push('is_active = ?')
       values.push(is_active ? 1 : 0)
     }
-    
+
     if (updates.length === 0) {
       return c.json({ success: false, error: '업데이트할 필드가 없습니다.' }, 400)
     }
-    
+
     updates.push('updated_at = CURRENT_TIMESTAMP')
-    values.push(accountId, userId)
-    
+    values.push(accountId)
+
     await DB.prepare(`
-      UPDATE accounts
+      UPDATE shared_wallet_accounts
       SET ${updates.join(', ')}
-      WHERE id = ? AND user_id = ?
+      WHERE id = ?
     `).bind(...values).run()
-    
+
+    await recalcSharedWalletSummary(DB, Number(account.wallet_id))
+
     return c.json({ success: true, message: '계좌가 수정되었습니다.' })
   } catch (error: any) {
     console.error('[Accounts] Update error:', error)
@@ -2135,23 +2909,41 @@ app.put('/api/accounts/:id', authMiddleware, async (c) => {
   }
 })
 
-// 계좌 삭제 (소프트 삭제 - 비활성화)
 app.delete('/api/accounts/:id', authMiddleware, async (c) => {
   const { DB } = c.env
-  const userId = c.get('userId')!
+  const userId = Number(c.get('userId') || 0)
   const accountId = parseInt(c.req.param('id'))
-  
+
   try {
-    const result = await DB.prepare(`
-      UPDATE accounts
-      SET is_active = 0, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND user_id = ?
-    `).bind(accountId, userId).run()
-    
-    if (result.meta.changes === 0) {
+    const account = await DB.prepare(`
+      SELECT swa.id, swa.shared_wallet_id
+      FROM shared_wallet_accounts swa
+      INNER JOIN shared_wallets sw ON sw.id = swa.shared_wallet_id
+      WHERE swa.id = ?
+        AND sw.is_active = 1
+        AND (
+          sw.owner_user_id = ?
+          OR EXISTS (
+            SELECT 1
+            FROM shared_wallet_members member
+            WHERE member.shared_wallet_id = sw.id
+              AND member.user_id = ?
+          )
+        )
+    `).bind(accountId, userId, userId).first() as any
+
+    if (!account) {
       return c.json({ success: false, error: '계좌를 찾을 수 없습니다.' }, 404)
     }
-    
+
+    await DB.prepare(`
+      UPDATE shared_wallet_accounts
+      SET is_active = 0, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(accountId).run()
+
+    await recalcSharedWalletSummary(DB, Number(account.shared_wallet_id))
+
     return c.json({ success: true, message: '계좌가 비활성화되었습니다.' })
   } catch (error: any) {
     console.error('[Accounts] Delete error:', error)
@@ -2161,83 +2953,73 @@ app.delete('/api/accounts/:id', authMiddleware, async (c) => {
 
 // ========== 이체(Transfers) API ==========
 
-// 계좌 간 이체 실행
 app.post('/api/transfers', authMiddleware, async (c) => {
   const { DB } = c.env
-  const userId = c.get('userId')!
-  const { from_account_id, to_account_id, amount, description, transfer_date } = await c.req.json()
-  
-  // 입력 검증
+  const userId = Number(c.get('userId') || 0)
+  const { wallet_id, from_account_id, to_account_id, amount, description, transfer_date } = await c.req.json()
+
   if (!from_account_id || !to_account_id || !amount || !transfer_date) {
     return c.json({ success: false, error: '모든 필드를 입력해주세요.' }, 400)
   }
-  
-  if (from_account_id === to_account_id) {
+
+  if (Number(from_account_id) === Number(to_account_id)) {
     return c.json({ success: false, error: '동일한 계좌 간 이체는 불가능합니다.' }, 400)
   }
-  
-  if (amount <= 0) {
+
+  if (Number(amount) <= 0) {
     return c.json({ success: false, error: '이체 금액은 0보다 커야 합니다.' }, 400)
   }
-  
+
   try {
-    // 출금 계좌 확인
-    const fromAccount = await DB.prepare(`
-      SELECT id, balance FROM accounts WHERE id = ? AND user_id = ? AND is_active = 1
-    `).bind(from_account_id, userId).first() as any
-    
+    const wallet = await getAccessibleWallet(DB, userId, normalizeOptionalInteger(wallet_id))
+    if (!wallet) {
+      return c.json({ success: false, error: '공유지갑을 찾을 수 없습니다.' }, 404)
+    }
+
+    await ensureSharedWalletTransfersTable(DB)
+
+    const fromAccount = await validateOwnedActiveAccount(DB, userId, Number(from_account_id), wallet.id)
+    const toAccount = await validateOwnedActiveAccount(DB, userId, Number(to_account_id), wallet.id)
+
     if (!fromAccount) {
       return c.json({ success: false, error: '출금 계좌를 찾을 수 없습니다.' }, 404)
     }
-    
-    // 입금 계좌 확인
-    const toAccount = await DB.prepare(`
-      SELECT id FROM accounts WHERE id = ? AND user_id = ? AND is_active = 1
-    `).bind(to_account_id, userId).first()
-    
     if (!toAccount) {
       return c.json({ success: false, error: '입금 계좌를 찾을 수 없습니다.' }, 404)
     }
-    
-    // 잔액 확인
-    if (fromAccount.balance < amount) {
+    if (Number(fromAccount.balance || 0) < Number(amount)) {
       return c.json({ success: false, error: '출금 계좌의 잔액이 부족합니다.' }, 400)
     }
-    
-    // 트랜잭션 시작 (배치 실행)
+
     const batch = [
-      // 이체 기록 삽입
       DB.prepare(`
-        INSERT INTO transfers (user_id, from_account_id, to_account_id, amount, description, transfer_date)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).bind(userId, from_account_id, to_account_id, amount, description || null, transfer_date),
-      
-      // 출금 계좌 잔액 감소
-      DB.prepare(`
-        UPDATE accounts
-        SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ? AND user_id = ?
-      `).bind(amount, from_account_id, userId),
-      
-      // 입금 계좌 잔액 증가
-      DB.prepare(`
-        UPDATE accounts
-        SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ? AND user_id = ?
-      `).bind(amount, to_account_id, userId)
+        INSERT INTO shared_wallet_transfers (
+          shared_wallet_id,
+          user_id,
+          from_account_id,
+          to_account_id,
+          amount,
+          description,
+          transfer_date
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).bind(wallet.id, userId, from_account_id, to_account_id, Number(amount), description || null, transfer_date),
+      buildAccountBalanceAdjustmentStatement(DB, userId, Number(from_account_id), -Number(amount), wallet.id),
+      buildAccountBalanceAdjustmentStatement(DB, userId, Number(to_account_id), Number(amount), wallet.id)
     ]
-    
+
     const results = await DB.batch(batch)
-    const transferId = results[0].meta.last_row_id
-    
+    const transferId = Number(results[0].meta.last_row_id)
+    await recalcSharedWalletSummary(DB, wallet.id)
+
     return c.json({
       success: true,
       transfer: {
         id: transferId,
-        user_id: userId,
-        from_account_id,
-        to_account_id,
-        amount,
+        wallet_id: wallet.id,
+        from_account_id: Number(from_account_id),
+        to_account_id: Number(to_account_id),
+        amount: Number(amount),
         description,
         transfer_date
       }
@@ -2248,33 +3030,46 @@ app.post('/api/transfers', authMiddleware, async (c) => {
   }
 })
 
-// 이체 내역 조회
 app.get('/api/transfers', authMiddleware, async (c) => {
   const { DB } = c.env
-  const userId = c.get('userId')!
+  const userId = Number(c.get('userId') || 0)
+  const walletId = normalizeOptionalInteger(c.req.query('wallet_id'))
   const accountId = c.req.query('account_id')
   const startDate = c.req.query('start_date')
   const endDate = c.req.query('end_date')
-  
+
   try {
+    const wallet = await getAccessibleWallet(DB, userId, walletId)
+    if (!wallet) {
+      return c.json({ success: true, transfers: [], current_wallet_id: null })
+    }
+
+    await ensureSharedWalletTransfersTable(DB)
+
     let query = `
-      SELECT t.id, t.user_id, t.from_account_id, t.to_account_id, t.amount,
-             t.description, t.transfer_date, t.created_at,
-             fa.name as from_account_name, ta.name as to_account_name
-      FROM transfers t
-      LEFT JOIN accounts fa ON t.from_account_id = fa.id
-      LEFT JOIN accounts ta ON t.to_account_id = ta.id
-      WHERE t.user_id = ?
+      SELECT
+        t.id,
+        t.shared_wallet_id AS wallet_id,
+        t.user_id,
+        t.from_account_id,
+        t.to_account_id,
+        t.amount,
+        t.description,
+        t.transfer_date,
+        t.created_at,
+        fa.name AS from_account_name,
+        ta.name AS to_account_name
+      FROM shared_wallet_transfers t
+      LEFT JOIN shared_wallet_accounts fa ON t.from_account_id = fa.id
+      LEFT JOIN shared_wallet_accounts ta ON t.to_account_id = ta.id
+      WHERE t.shared_wallet_id = ?
     `
-    const params: any[] = [userId]
-    
-    // 특정 계좌 필터링
+    const params: any[] = [wallet.id]
+
     if (accountId) {
       query += ' AND (t.from_account_id = ? OR t.to_account_id = ?)'
       params.push(parseInt(accountId), parseInt(accountId))
     }
-    
-    // 날짜 범위 필터링
     if (startDate) {
       query += ' AND t.transfer_date >= ?'
       params.push(startDate)
@@ -2283,13 +3078,14 @@ app.get('/api/transfers', authMiddleware, async (c) => {
       query += ' AND t.transfer_date <= ?'
       params.push(endDate)
     }
-    
+
     query += ' ORDER BY t.transfer_date DESC, t.created_at DESC'
-    
+
     const result = await DB.prepare(query).bind(...params).all()
-    
+
     return c.json({
       success: true,
+      current_wallet_id: wallet.id,
       transfers: result.results || []
     })
   } catch (error: any) {

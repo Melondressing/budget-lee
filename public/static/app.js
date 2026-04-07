@@ -33,6 +33,15 @@ const state = {
   fixedExpenses: [],
   budgets: [],
   investments: [],
+  wallets: [],
+  accounts: [],
+  transfers: [],
+  walletTransactions: [],
+  currentWalletId: (() => {
+    const stored = localStorage.getItem('currentWalletId');
+    const parsed = Number(stored);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  })(),
   settings: {
     currency: 'KRW',
     initial_balance: 0,
@@ -52,8 +61,23 @@ const state = {
   // 인증 관련 상태
   isAuthenticated: false,
   currentUser: null,
-  authToken: localStorage.getItem('authToken') || localStorage.getItem('auth_token') || null
+  authToken: localStorage.getItem('authToken') || null
 };
+
+function getCurrentWallet() {
+  return state.wallets.find(wallet => Number(wallet.id) === Number(state.currentWalletId)) || null;
+}
+
+function setCurrentWalletId(walletId) {
+  const normalized = Number(walletId);
+  state.currentWalletId = Number.isInteger(normalized) && normalized > 0 ? normalized : null;
+
+  if (state.currentWalletId) {
+    localStorage.setItem('currentWalletId', String(state.currentWalletId));
+  } else {
+    localStorage.removeItem('currentWalletId');
+  }
+}
 
 // 배경 테마 정의 - 다국어 지원
 
@@ -108,24 +132,14 @@ const BACKGROUND_THEMES = getBackgroundThemes();
 // 카테고리 정의 - 다국어 지원
 
 function getCategories() {
-  const unique = (values) => [...new Set(values.filter(Boolean))];
-
   return {
-    income: unique([
+    income: [
       t('category.income.salary'),
       t('category.income.bonus'),
       t('category.income.side'),
-      t('category.income.other'),
-      'Salary',
-      'Bonus',
-      'Side Income',
-      'Other Income',
-      '급여',
-      '상여금',
-      '부수입',
-      '기타수입'
-    ]),
-    expense: unique([
+      t('category.income.other')
+    ],
+    expense: [
       t('category.expense.clothing'),
       t('category.expense.food'),
       t('category.expense.housing'),
@@ -136,57 +150,16 @@ function getCategories() {
       t('category.expense.education'),
       t('category.expense.communication'),
       t('category.expense.insurance'),
-      t('category.expense.other'),
-      'Clothing',
-      'Food',
-      'Housing',
-      'Living',
-      'Transport',
-      'Entertainment',
-      'Culture',
-      'Shopping',
-      'Medical',
-      'Education',
-      'Communication',
-      'Insurance',
-      'Other',
-      '식비',
-      '교통비',
-      '주거비',
-      '문화생활',
-      '쇼핑',
-      '의료비',
-      '교육비',
-      '통신비',
-      '보험',
-      '기타지출',
-      '의복비'
-    ]),
-    savings: unique([
-      t('category.savings.savings'),
-      'Savings',
-      '저축'
-    ])
+      t('category.expense.other')
+    ],
+    savings: [
+      t('category.savings.savings')
+    ]
   };
 }
 
 // Dynamic categories based on current language
 const categories = getCategories();
-
-function registerCategory(type, category) {
-  if (!type || !category || !categories[type]) return;
-  if (!categories[type].includes(category)) {
-    categories[type].push(category);
-  }
-}
-
-function registerCategoriesFromRecords(records, typeKey) {
-  if (!Array.isArray(records)) return;
-  records.forEach((record) => {
-    if (!record?.category) return;
-    registerCategory(typeKey || record.type || 'expense', record.category);
-  });
-}
 
 // 통화 정의
 
@@ -230,6 +203,450 @@ function formatCurrencyShort(amount) {
   return formatCurrency(amount);
 }
 
+function formatCurrencyByCode(amount, currencyCode = state.settings.currency || 'KRW') {
+  const symbol = CURRENCIES[currencyCode]?.symbol || '₩';
+  return `${symbol}${Number(amount || 0).toLocaleString()}`;
+}
+
+function getWalletAccountTypes() {
+  return [
+    { value: 'checking', label: t('wallet.type.checking'), icon: 'fa-university', accent: 'blue' },
+    { value: 'savings', label: t('wallet.type.savings'), icon: 'fa-piggy-bank', accent: 'green' },
+    { value: 'credit_card', label: t('wallet.type.credit_card'), icon: 'fa-credit-card', accent: 'purple' },
+    { value: 'cash', label: t('wallet.type.cash'), icon: 'fa-money-bill-wave', accent: 'amber' }
+  ];
+}
+
+function getWalletAccountTypeMeta(type) {
+  return getWalletAccountTypes().find(item => item.value === type) || {
+    value: type,
+    label: type,
+    icon: 'fa-wallet',
+    accent: 'slate'
+  };
+}
+
+function getWalletAccentClasses(accent) {
+  const palette = {
+    blue: { badge: 'bg-blue-100 text-blue-700', panel: 'bg-blue-50 text-blue-600' },
+    green: { badge: 'bg-green-100 text-green-700', panel: 'bg-green-50 text-green-600' },
+    purple: { badge: 'bg-purple-100 text-purple-700', panel: 'bg-purple-50 text-purple-600' },
+    amber: { badge: 'bg-amber-100 text-amber-700', panel: 'bg-amber-50 text-amber-700' },
+    slate: { badge: 'bg-slate-100 text-slate-700', panel: 'bg-slate-50 text-slate-600' }
+  };
+
+  return palette[accent] || palette.slate;
+}
+
+function getPaymentMethodMeta(method) {
+  if (method === 'cash') {
+    return { label: t('payment.cash'), icon: 'fa-money-bill-wave', classes: 'bg-emerald-100 text-emerald-700' };
+  }
+  if (method === 'transfer') {
+    return { label: t('payment.transfer'), icon: 'fa-right-left', classes: 'bg-cyan-100 text-cyan-700' };
+  }
+  return { label: t('payment.card'), icon: 'fa-credit-card', classes: 'bg-violet-100 text-violet-700' };
+}
+
+function getTransactionAccountLabel(transaction) {
+  return transaction.account_name || t('wallet.unassigned_account');
+}
+
+function renderTransactionAccountSelect(selectedAccountId = null) {
+  return `
+    <div>
+      <label class="block text-sm font-medium mb-2">${t('transaction.linked_account')} (${t('common.optional')})</label>
+      <select name="account_id" class="w-full px-4 py-2 border rounded">
+        <option value="">${t('common.select_placeholder')}</option>
+        ${state.accounts.map(account => {
+          const meta = getWalletAccountTypeMeta(account.type);
+          const isSelected = String(account.id) === String(selectedAccountId || '');
+          return `<option value="${account.id}" ${isSelected ? 'selected' : ''}>${account.name} · ${meta.label}</option>`;
+        }).join('')}
+      </select>
+      <p class="text-xs text-gray-500 mt-1">${t('transaction.linked_account_hint')}</p>
+    </div>
+  `;
+}
+
+function getSelectedWalletBulkTransactionIds() {
+  return Array.from(document.querySelectorAll('[data-wallet-bulk-checkbox]:checked'))
+    .map(element => Number(element.value))
+    .filter(value => Number.isInteger(value) && value > 0);
+}
+
+function toggleWalletBulkSelection(checked) {
+  document.querySelectorAll('[data-wallet-bulk-checkbox]').forEach(element => {
+    element.checked = checked;
+  });
+}
+
+function renderWalletBulkAssignment(unassignedTransactions) {
+  if (unassignedTransactions.length === 0) {
+    return `
+      <section class="bg-white rounded-lg shadow p-6">
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <h3 class="text-xl font-bold text-gray-800">${t('wallet.unassigned_title')}</h3>
+            <p class="text-sm text-gray-500 mt-1">${t('wallet.bulk_no_items')}</p>
+          </div>
+          <span class="inline-flex items-center rounded-full bg-green-50 px-3 py-1 text-sm font-semibold text-green-700">
+            0
+          </span>
+        </div>
+      </section>
+    `;
+  }
+
+  return `
+    <section class="bg-white rounded-lg shadow p-6 space-y-5">
+      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <h3 class="text-xl font-bold text-gray-800">${t('wallet.unassigned_title')}</h3>
+          <p class="text-sm text-gray-500 mt-1">${t('wallet.unassigned_desc')}</p>
+        </div>
+        <div class="inline-flex items-center rounded-full bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700">
+          ${t('wallet.unassigned_count')}: ${unassignedTransactions.length}${getLanguage() === 'ko' ? '건' : ''}
+        </div>
+      </div>
+
+      <form onsubmit="handleWalletBulkAssignment(event)" class="space-y-4">
+        <div class="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-4 gap-3">
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('transaction.linked_account')}</label>
+            <select name="account_id" class="w-full px-4 py-2 border rounded">
+              <option value="">${t('common.select_placeholder')}</option>
+              ${state.accounts.map(account => {
+                const meta = getWalletAccountTypeMeta(account.type);
+                return `<option value="${account.id}">${account.name} · ${meta.label}</option>`;
+              }).join('')}
+            </select>
+          </div>
+          <div class="flex items-end">
+            <button type="submit" class="w-full px-4 py-2 bg-cyan-600 text-white rounded-lg hover:bg-cyan-700 font-medium">
+              ${t('wallet.bulk_apply')}
+            </button>
+          </div>
+          <div class="flex items-end gap-2">
+            <button type="button" onclick="toggleWalletBulkSelection(true)" class="flex-1 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200">
+              ${t('wallet.select_all')}
+            </button>
+            <button type="button" onclick="toggleWalletBulkSelection(false)" class="flex-1 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200">
+              ${t('wallet.clear_selection')}
+            </button>
+          </div>
+        </div>
+
+        <div class="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+          ${unassignedTransactions.map(transaction => {
+            const meta = getPaymentMethodMeta(transaction.payment_method || 'card');
+            return `
+              <label class="flex items-start gap-3 rounded-2xl border border-gray-100 bg-gray-50/70 p-4 hover:border-cyan-200 hover:bg-cyan-50/40 transition cursor-pointer">
+                <input type="checkbox" value="${transaction.id}" data-wallet-bulk-checkbox class="mt-1 h-4 w-4 rounded border-gray-300 text-cyan-600 focus:ring-cyan-500">
+                <div class="min-w-0 flex-1">
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span class="font-semibold text-gray-900">${translateCategoryName(transaction.category)}</span>
+                    <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${meta.classes}">
+                      <i class="fas ${meta.icon} mr-1"></i>${meta.label}
+                    </span>
+                  </div>
+                  <p class="text-sm text-gray-600 mt-1">${transaction.date}${transaction.description ? ` · ${transaction.description}` : ''}</p>
+                  <p class="text-xs text-amber-700 mt-1">${t('wallet.unassigned_account')}</p>
+                </div>
+                <div class="text-right shrink-0">
+                  <p class="text-lg font-bold text-rose-600">${formatCurrencyByCode(transaction.amount)}</p>
+                  <p class="mt-2 text-xs text-gray-500">${t('wallet.bulk_apply')}</p>
+                </div>
+              </label>
+            `;
+          }).join('')}
+        </div>
+      </form>
+    </section>
+  `;
+}
+
+async function handleWalletBulkAssignment(event) {
+  event.preventDefault();
+
+  if (!state.currentWalletId) {
+    alert(t('wallet.select_wallet_first'));
+    return;
+  }
+
+  const selectedIds = getSelectedWalletBulkTransactionIds();
+  if (selectedIds.length === 0) {
+    alert(t('wallet.bulk_no_selection'));
+    return;
+  }
+
+  const formData = new FormData(event.target);
+  const accountId = formData.get('account_id') || null;
+
+  if (!accountId) {
+    alert(t('wallet.bulk_require_account'));
+    return;
+  }
+
+  try {
+    const response = await axios.post('/api/wallet-transactions/bulk-update', {
+      wallet_id: state.currentWalletId,
+      transaction_ids: selectedIds,
+      account_id: accountId
+    });
+
+    if (response.data.success) {
+      alert(t('wallet.bulk_updated').replace('{count}', response.data.updated_count || selectedIds.length));
+      await renderWalletView();
+    }
+  } catch (error) {
+    alert(error.response?.data?.error || '저장 중 오류가 발생했습니다.');
+  }
+}
+
+function renderSavingsGoalCards(limit = null, sourceAccounts = state.savingsAccounts) {
+  const goalAccounts = sourceAccounts.filter(account => Number(account.savings_goal || 0) > 0);
+  const accountsToRender = limit ? goalAccounts.slice(0, limit) : goalAccounts;
+
+  if (accountsToRender.length === 0) {
+    return `<p class="text-sm text-gray-500 py-4">${t('wallet.no_goals')}</p>`;
+  }
+
+  return `
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      ${accountsToRender.map(account => {
+        const currentSavings = Number(account.total_savings ?? account.balance ?? 0);
+        const goal = Number(account.savings_goal || 0);
+        const progress = goal > 0 ? Math.min((currentSavings / goal) * 100, 100) : 0;
+
+        return `
+          <article class="border border-green-100 rounded-xl p-4 bg-green-50/60">
+            <div class="flex items-start justify-between gap-3">
+              <div>
+                <h4 class="font-semibold text-gray-900">${account.name}</h4>
+                <p class="text-sm text-gray-500 mt-1">${t('wallet.linked_goal')}</p>
+              </div>
+              <button onclick="openSavingsGoalModal(${account.id}, ${goal})" class="text-green-600 hover:text-green-700" title="${t('savings.edit_goal_tooltip')}">
+                <i class="fas fa-bullseye"></i>
+              </button>
+            </div>
+            <div class="mt-4 flex items-end justify-between gap-3">
+              <div>
+                <p class="text-xs text-gray-500">${t('savings.current')}</p>
+                <p class="text-xl font-bold text-gray-900">${formatCurrency(currentSavings)}</p>
+              </div>
+              <div class="text-right">
+                <p class="text-xs text-gray-500">${t('savings.target')}</p>
+                <p class="text-lg font-semibold text-green-700">${formatCurrency(goal)}</p>
+              </div>
+            </div>
+            <div class="mt-4">
+              <div class="flex justify-between text-xs text-gray-600 mb-1">
+                <span>${t('savings.progress')}</span>
+                <span>${progress.toFixed(1)}%</span>
+              </div>
+              <div class="w-full bg-white rounded-full h-3 overflow-hidden">
+                <div class="h-3 rounded-full bg-gradient-to-r from-green-400 to-green-600" style="width:${progress}%"></div>
+              </div>
+            </div>
+          </article>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+function renderMonthlyWalletSnapshot(yearMonth) {
+  const totalWalletBalance = state.accounts.reduce((sum, account) => sum + Number(account.balance || 0), 0);
+  const monthlyTransferVolume = state.transfers.reduce((sum, transfer) => sum + Number(transfer.amount || 0), 0);
+  const goalCount = state.savingsAccounts.filter(account => Number(account.savings_goal || 0) > 0).length;
+  const monthlyUsageTotal = state.transactions
+    .filter(transaction => transaction.type === 'expense' || transaction.type === 'savings')
+    .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+
+  return `
+    <div class="bg-white p-6 rounded-lg shadow space-y-5">
+      <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div>
+          <h3 class="text-xl font-bold text-gray-800">
+            <i class="fas fa-wallet mr-2 text-cyan-600"></i>${t('wallet.monthly_snapshot')}
+          </h3>
+          <p class="text-sm text-gray-500 mt-1">${yearMonth}</p>
+        </div>
+        <button onclick="switchView('wallet')" class="px-4 py-2 bg-cyan-600 text-white rounded-lg hover:bg-cyan-700">
+          ${t('wallet.open_wallet')}
+        </button>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+        <div class="rounded-xl bg-cyan-50 p-4">
+          <p class="text-sm text-cyan-700">${t('home.total_assets')}</p>
+          <p class="text-2xl font-bold text-cyan-900 mt-2">${formatCurrencyByCode(totalWalletBalance)}</p>
+        </div>
+        <div class="rounded-xl bg-violet-50 p-4">
+          <p class="text-sm text-violet-700">${t('wallet.monthly_transfer_volume')}</p>
+          <p class="text-2xl font-bold text-violet-900 mt-2">${formatCurrencyByCode(monthlyTransferVolume)}</p>
+        </div>
+        <div class="rounded-xl bg-green-50 p-4">
+          <p class="text-sm text-green-700">${t('wallet.goal_count')}</p>
+          <p class="text-2xl font-bold text-green-900 mt-2">${goalCount}${getLanguage() === 'ko' ? '개' : ''}</p>
+        </div>
+        <div class="rounded-xl bg-amber-50 p-4">
+          <p class="text-sm text-amber-700">${t('wallet.monthly_usage')}</p>
+          <p class="text-2xl font-bold text-amber-900 mt-2">${formatCurrencyByCode(monthlyUsageTotal)}</p>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 xl:grid-cols-2 gap-5">
+        <section>
+          <h4 class="font-semibold text-gray-800 mb-3">${t('wallet.accounts')}</h4>
+          ${state.accounts.length === 0 ? `
+            <p class="text-sm text-gray-500">${t('wallet.no_accounts')}</p>
+          ` : `
+            <div class="space-y-3">
+              ${state.accounts.slice(0, 4).map(account => {
+                const meta = getWalletAccountTypeMeta(account.type);
+                return `
+                  <div class="border border-gray-200 rounded-lg p-3 flex items-center justify-between gap-3">
+                    <div>
+                      <p class="font-medium text-gray-900">${account.name}</p>
+                      <p class="text-xs text-gray-500 mt-1">${meta.label}</p>
+                    </div>
+                    <p class="text-lg font-bold text-gray-900">${formatCurrencyByCode(account.balance, account.currency)}</p>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+          `}
+        </section>
+
+        <section>
+          <h4 class="font-semibold text-gray-800 mb-3">${t('wallet.savings_goals')}</h4>
+          ${renderSavingsGoalCards(2)}
+        </section>
+      </div>
+    </div>
+  `;
+}
+
+function renderWalletAccountOverview(totalBalance, accountUsageSummary = {}) {
+  return `
+    <section class="relative overflow-hidden rounded-[28px] border border-white/70 bg-gradient-to-br from-white/80 via-cyan-50/90 to-blue-100/80 p-6 shadow-lg backdrop-blur-xl">
+      <div class="absolute -top-12 right-0 h-32 w-32 rounded-full bg-cyan-200/40 blur-3xl"></div>
+      <div class="absolute -bottom-10 left-8 h-24 w-24 rounded-full bg-blue-200/30 blur-3xl"></div>
+
+      <div class="relative z-10 space-y-5">
+        <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p class="text-sm font-semibold text-cyan-700">${t('wallet.account_overview')}</p>
+            <h3 class="mt-2 text-3xl font-bold text-slate-900">${formatCurrencyByCode(totalBalance)}</h3>
+            <p class="mt-2 text-sm text-slate-600">${t('wallet.account_overview_desc')}</p>
+          </div>
+          <div class="inline-flex w-fit items-center gap-3 rounded-2xl border border-white/80 bg-white/70 px-4 py-3 shadow-sm">
+            <div class="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-100 text-cyan-700">
+              <i class="fas fa-wallet text-lg"></i>
+            </div>
+            <div>
+              <p class="text-xs text-slate-500">${t('wallet.account_count')}</p>
+              <p class="text-xl font-bold text-slate-900">${state.accounts.length}</p>
+            </div>
+          </div>
+        </div>
+
+        ${state.accounts.length === 0 ? `
+          <div class="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-6 text-center text-slate-500">
+            ${t('wallet.no_accounts')}
+          </div>
+        ` : `
+          <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+            ${state.accounts.map(account => {
+              const meta = getWalletAccountTypeMeta(account.type);
+              const accentClasses = getWalletAccentClasses(meta.accent);
+              const accountUsage = accountUsageSummary[account.id] || { total: 0, count: 0 };
+
+              return `
+                <article class="rounded-2xl border border-white/80 bg-white/75 p-4 shadow-sm backdrop-blur-sm">
+                  <div class="flex items-start justify-between gap-3">
+                    <div class="min-w-0">
+                      <p class="truncate text-base font-semibold text-slate-900">${account.name}</p>
+                      <p class="mt-1 text-xs text-slate-500">${meta.label}</p>
+                    </div>
+                    <div class="flex h-10 w-10 items-center justify-center rounded-2xl ${accentClasses.panel}">
+                      <i class="fas ${meta.icon}"></i>
+                    </div>
+                  </div>
+                  <div class="mt-4">
+                    <p class="text-xs text-slate-500">${t('common.balance')}</p>
+                    <p class="mt-1 text-xl font-bold text-slate-900">${formatCurrencyByCode(account.balance, account.currency)}</p>
+                  </div>
+                  <div class="mt-3 pt-3 border-t border-slate-100">
+                    <p class="text-xs text-slate-500">${t('wallet.monthly_usage')}</p>
+                    <p class="mt-1 text-sm font-semibold text-rose-600">${formatCurrencyByCode(accountUsage.total, account.currency)}</p>
+                    <p class="mt-1 text-xs text-slate-400">${accountUsage.count}${getLanguage() === 'ko' ? '건 연결' : ' linked items'}</p>
+                  </div>
+                </article>
+              `;
+            }).join('')}
+          </div>
+        `}
+      </div>
+    </section>
+  `;
+}
+
+function renderWalletCategoryUsage(expenseCategoryUsage) {
+  if (expenseCategoryUsage.length === 0) {
+    return `
+      <div class="rounded-2xl border border-dashed border-gray-300 p-8 text-center">
+        <i class="fas fa-layer-group mb-3 text-4xl text-gray-300"></i>
+        <p class="text-gray-500">${t('wallet.no_category_usage')}</p>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="space-y-3">
+      ${expenseCategoryUsage.map(item => {
+        const categoryIcon = typeof window.getCategoryIcon === 'function' ? window.getCategoryIcon(item.category) : '🧾';
+        const categoryLabel = typeof window.translateCategoryName === 'function' ? window.translateCategoryName(item.category) : item.category;
+        const methodSummary = ['card', 'cash', 'transfer']
+          .filter(method => Number(item.methods[method] || 0) > 0)
+          .map(method => {
+            const meta = getPaymentMethodMeta(method);
+            return `${meta.label} ${formatCurrencyByCode(item.methods[method])}`;
+          })
+          .join(' · ');
+        const accountSummary = Object.values(item.accounts || {}).sort((a, b) => b.total - a.total);
+
+        return `
+          <article class="rounded-2xl border border-gray-100 bg-white/70 p-4">
+            <div class="flex items-start justify-between gap-4">
+              <div class="flex min-w-0 items-start gap-3">
+                <div class="flex h-11 w-11 items-center justify-center rounded-2xl bg-slate-100 text-xl">
+                  <span>${categoryIcon}</span>
+                </div>
+                <div class="min-w-0">
+                  <p class="truncate font-semibold text-gray-900">${categoryLabel}</p>
+                  <p class="mt-1 text-xs text-gray-500">${item.count}${getLanguage() === 'ko' ? '건' : ' items'}</p>
+                  <p class="mt-2 text-xs text-gray-500">${methodSummary}</p>
+                  <div class="mt-2 flex flex-wrap gap-2">
+                    ${accountSummary.map(account => `
+                      <span class="inline-flex items-center rounded-full bg-cyan-50 px-2.5 py-1 text-[11px] font-medium text-cyan-700">
+                        ${account.name} ${formatCurrencyByCode(account.total)}
+                      </span>
+                    `).join('')}
+                  </div>
+                </div>
+              </div>
+              <p class="shrink-0 text-lg font-bold text-rose-600">${formatCurrencyByCode(item.total)}</p>
+            </div>
+          </article>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
 function getYearMonth(date) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -265,6 +682,92 @@ function getWeekStart(date) {
   const day = d.getDay();
   const diff = d.getDate() - day;
   return new Date(d.setDate(diff));
+}
+
+function getMonthLabel(month) {
+  if (getLanguage() === 'ko') {
+    return `${month}월`;
+  }
+
+  return new Date(2024, month - 1, 1).toLocaleString('en-US', { month: 'long' });
+}
+
+function getFixedExpenseWeekOptions() {
+  return getLanguage() === 'ko'
+    ? ['첫째 주', '둘째 주', '셋째 주', '넷째 주', '다섯째 주']
+    : ['1st week', '2nd week', '3rd week', '4th week', '5th week'];
+}
+
+function getFixedExpenseFrequencyOptions() {
+  return [
+    { value: 'daily', label: t('fixed.frequency.daily') },
+    { value: 'weekly', label: t('fixed.weekly') },
+    { value: 'monthly_day', label: `${t('fixed.frequency.monthly')} (${t('fixed.payment_day')})` },
+    { value: 'monthly', label: `${t('fixed.frequency.monthly')} (${t('fixed.week_of_month')}/${t('fixed.day_of_week')})` },
+    { value: 'yearly', label: t('fixed.frequency.yearly') }
+  ];
+}
+
+function getFixedExpensePeriodGroup(frequency) {
+  if (frequency === 'daily') return 'daily';
+  if (frequency === 'weekly') return 'weekly';
+  if (frequency === 'yearly') return 'yearly';
+  return 'monthly';
+}
+
+function getFixedExpenseStatusMeta(instance) {
+  if (instance.is_paid) {
+    return {
+      label: t('fixed.status.paid'),
+      classes: 'bg-green-100 text-green-700'
+    };
+  }
+
+  if (instance.is_overdue) {
+    return {
+      label: t('fixed.status.overdue'),
+      classes: 'bg-red-100 text-red-700'
+    };
+  }
+
+  return {
+    label: t('fixed.status.pending'),
+    classes: 'bg-amber-100 text-amber-700'
+  };
+}
+
+function getFixedExpenseScheduleLabel(instance) {
+  if (instance.frequency === 'daily') {
+    return t('fixed.frequency.daily');
+  }
+
+  if (instance.frequency === 'weekly') {
+    return `${t('fixed.weekly')} ${getDayName(instance.day_of_week)}${t('fixed.day_of_week_suffix')}`;
+  }
+
+  if (instance.frequency === 'monthly') {
+    const weekLabel = getFixedExpenseWeekOptions()[Math.max(0, Number(instance.week_of_month || 1) - 1)] || '';
+    return `${t('fixed.frequency.monthly')} ${weekLabel} ${getDayName(instance.day_of_week)}${t('fixed.day_of_week_suffix')}`;
+  }
+
+  if (instance.frequency === 'monthly_day') {
+    return `${t('fixed.monthly_day')} ${instance.payment_day}${t('fixed.day_suffix')}`;
+  }
+
+  if (instance.frequency === 'yearly') {
+    return `${t('fixed.frequency.yearly')} ${getMonthLabel(Number(instance.month_of_year))} ${instance.payment_day}${t('fixed.day_suffix')}`;
+  }
+
+  return instance.frequency;
+}
+
+function getFixedExpenseSummaryGroups(instances) {
+  return {
+    daily: instances.filter(item => getFixedExpensePeriodGroup(item.frequency) === 'daily'),
+    weekly: instances.filter(item => getFixedExpensePeriodGroup(item.frequency) === 'weekly'),
+    monthly: instances.filter(item => getFixedExpensePeriodGroup(item.frequency) === 'monthly'),
+    yearly: instances.filter(item => getFixedExpensePeriodGroup(item.frequency) === 'yearly')
+  };
 }
 
 // N번째 특정 요일 날짜 구하기
@@ -441,7 +944,6 @@ function setAuthToken(accessToken, refreshToken) {
   console.log('[Auth] Setting tokens - Access:', accessToken?.substring(0, 20) + '...', 'Refresh:', refreshToken?.substring(0, 20) + '...');
   state.authToken = accessToken;
   localStorage.setItem('authToken', accessToken);
-  localStorage.setItem('auth_token', accessToken);
   localStorage.setItem('refreshToken', refreshToken);
   axios.defaults.headers.common['Authorization'] = `Bearer ${accessToken}`;
   console.log('[Auth] Tokens set successfully');
@@ -452,27 +954,23 @@ function clearAuthToken() {
   state.isAuthenticated = false;
   state.currentUser = null;
   localStorage.removeItem('authToken');
-  localStorage.removeItem('auth_token');
   localStorage.removeItem('refreshToken');
   delete axios.defaults.headers.common['Authorization'];
 }
 
 async function checkAuth() {
-  const token = localStorage.getItem('authToken') || localStorage.getItem('auth_token');
-  const sessionId = localStorage.getItem('sessionId');
-
+  const token = localStorage.getItem('authToken');
+  
+  if (!token) {
+    return false;
+  }
+  
   try {
-    if (token) {
-      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-    } else if (sessionId) {
-      axios.defaults.headers.common['Authorization'] = `Bearer ${sessionId}`;
-    } else {
-      delete axios.defaults.headers.common['Authorization'];
-    }
+    axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
     
     const response = await axios.get('/api/auth/me');
     
-    if (response.data.success && response.data.user) {
+    if (response.data.success) {
       state.isAuthenticated = true;
       state.currentUser = response.data.user;
       return true;
@@ -480,7 +978,6 @@ async function checkAuth() {
   } catch (error) {
     console.error('[Auth] Check failed:', error);
     localStorage.removeItem('authToken');
-    localStorage.removeItem('auth_token');
     delete axios.defaults.headers.common['Authorization'];
   }
   
@@ -498,7 +995,6 @@ axios.interceptors.response.use(
     if (status === 401) {
       console.warn('[Auth] 401 Unauthorized - 토큰 만료, 로그아웃 처리');
       localStorage.removeItem('authToken');
-      localStorage.removeItem('auth_token');
       delete axios.defaults.headers.common['Authorization'];
       
       if (state.isAuthenticated) {
@@ -583,7 +1079,6 @@ async function handleLogin(event) {
     // 로컬 저장 + Authorization 헤더 세팅
     console.log('[Login] Setting token...');
     localStorage.setItem('authToken', token);
-    localStorage.setItem('auth_token', token);
     axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
     
     // 자동 로그인 설정
@@ -651,7 +1146,6 @@ async function handleRegister(event) {
     
     if (token) {
       localStorage.setItem('authToken', token);
-      localStorage.setItem('auth_token', token);
       axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
     }
     
@@ -668,7 +1162,6 @@ function handleLogout() {
   if (confirm('로그아웃 하시겠습니까?')) {
     // 인증 토큰만 제거 (로그아웃)
     localStorage.removeItem('authToken');
-    localStorage.removeItem('auth_token');
     
     // "로그인 상태 유지" 옵션도 제거 (로그아웃하면 초기화)
     localStorage.removeItem('rememberMe');
@@ -676,12 +1169,7 @@ function handleLogout() {
     // 중요: savedUsername, 거래내역, 설정 등은 유지 (절대 삭제 안 함)
     // 중요: localStorage에 저장된 모든 재무 데이터 보호
     
-    const sessionId = localStorage.getItem('sessionId');
-    if (sessionId) {
-      axios.defaults.headers.common['Authorization'] = `Bearer ${sessionId}`;
-    } else {
-      delete axios.defaults.headers.common['Authorization'];
-    }
+    delete axios.defaults.headers.common['Authorization'];
     state.isAuthenticated = false;
     state.currentUser = null;
     
@@ -999,6 +1487,9 @@ async function renderApp() {
             <button id="tab-savings" class="tab-button border-b-2 border-transparent text-gray-600 hover:text-gray-800 py-4 px-6">
               <i class="fas fa-piggy-bank mr-2"></i>${t('tab.savings')}
             </button>
+            <button id="tab-wallet" class="tab-button border-b-2 border-transparent text-gray-600 hover:text-gray-800 py-4 px-6">
+              <i class="fas fa-wallet mr-2"></i>${t('tab.wallet')}
+            </button>
             <button id="tab-fixed-expenses" class="tab-button border-b-2 border-transparent text-gray-600 hover:text-gray-800 py-4 px-6">
               <i class="fas fa-redo mr-2"></i>${t('tab.fixed_expenses')}
             </button>
@@ -1049,10 +1540,9 @@ async function renderApp() {
   // 설정 로드 및 초기 뷰 렌더링
   await fetchSettings();
   await switchView('home');
-}
-
-function isChartLibraryReady() {
-  return typeof Chart !== 'undefined';
+  setTimeout(() => {
+    checkFixedExpenseReminders();
+  }, 300);
 }
 
 function setupTabListeners() {
@@ -1060,6 +1550,7 @@ function setupTabListeners() {
   document.getElementById('tab-month').onclick = () => switchView('month');
   document.getElementById('tab-week').onclick = () => switchView('week');
   document.getElementById('tab-savings').onclick = () => switchView('savings');
+  document.getElementById('tab-wallet').onclick = () => switchView('wallet');
   document.getElementById('tab-fixed-expenses').onclick = () => switchView('fixed-expenses');
   document.getElementById('tab-budgets').onclick = () => switchView('budgets');
   document.getElementById('tab-investments').onclick = () => switchView('investments');
@@ -1081,7 +1572,6 @@ async function fetchTransactions(startDate, endDate, type = null) {
     const response = await axios.get(url);
     if (response.data.success) {
       state.transactions = response.data.data;
-      registerCategoriesFromRecords(state.transactions);
     }
   } catch (error) {}
 }
@@ -1096,13 +1586,99 @@ async function fetchSavingsAccounts() {
   } catch (error) {}
 }
 
+async function fetchWalletAccounts() {
+  try {
+    const params = {};
+    if (state.currentWalletId) {
+      params.wallet_id = state.currentWalletId;
+    }
+
+    const response = await axios.get('/api/accounts', { params });
+    if (response.data.success) {
+      state.accounts = response.data.accounts || [];
+      if (response.data.current_wallet_id) {
+        setCurrentWalletId(response.data.current_wallet_id);
+      }
+    }
+  } catch (error) {
+    console.error('Failed to fetch accounts:', error);
+    state.accounts = [];
+  }
+}
+
+async function fetchWallets() {
+  try {
+    const response = await axios.get('/api/wallets');
+    if (response.data.success) {
+      state.wallets = response.data.wallets || [];
+
+      const hasSelectedWallet = state.wallets.some(wallet => Number(wallet.id) === Number(state.currentWalletId));
+      if (!hasSelectedWallet) {
+        setCurrentWalletId(response.data.current_wallet_id || state.wallets[0]?.id || null);
+      }
+    }
+  } catch (error) {
+    console.error('Failed to fetch wallets:', error);
+    state.wallets = [];
+    setCurrentWalletId(null);
+  }
+}
+
+async function fetchWalletTransactions(startDate, endDate, type = null) {
+  try {
+    const params = {
+      wallet_id: state.currentWalletId,
+      start_date: startDate,
+      end_date: endDate
+    };
+
+    if (type) {
+      params.type = type;
+    }
+
+    const response = await axios.get('/api/wallet-transactions', { params });
+    if (response.data.success) {
+      state.walletTransactions = response.data.transactions || [];
+    }
+  } catch (error) {
+    console.error('Failed to fetch wallet transactions:', error);
+    state.walletTransactions = [];
+  }
+}
+
+async function fetchTransfers(filters = null) {
+  try {
+    let params;
+    if (typeof filters === 'number') {
+      params = { account_id: filters, wallet_id: state.currentWalletId };
+    } else if (filters && typeof filters === 'object') {
+      params = {};
+      if (filters.accountId) params.account_id = filters.accountId;
+      if (filters.startDate) params.start_date = filters.startDate;
+      if (filters.endDate) params.end_date = filters.endDate;
+      if (filters.walletId || state.currentWalletId) params.wallet_id = filters.walletId || state.currentWalletId;
+    } else if (state.currentWalletId) {
+      params = { wallet_id: state.currentWalletId };
+    }
+    const response = await axios.get('/api/transfers', { params });
+    if (response.data.success) {
+      state.transfers = response.data.transfers || [];
+      if (response.data.current_wallet_id) {
+        setCurrentWalletId(response.data.current_wallet_id);
+      }
+    }
+  } catch (error) {
+    console.error('Failed to fetch transfers:', error);
+    state.transfers = [];
+  }
+}
+
 // 고정지출 가져오기
 async function fetchFixedExpenses() {
   try {
     const response = await axios.get('/api/fixed-expenses');
     if (response.data.success) {
       state.fixedExpenses = response.data.data;
-      registerCategoriesFromRecords(state.fixedExpenses, 'expense');
     }
   } catch (error) {}
 }
@@ -1127,7 +1703,6 @@ async function fetchBudgets() {
     const response = await axios.get('/api/budgets');
     if (response.data.success) {
       state.budgets = response.data.data;
-      registerCategoriesFromRecords(state.budgets, 'expense');
     }
   } catch (error) {}
 }
@@ -1198,7 +1773,7 @@ async function switchView(view) {
   state.activeView = view;
   
   // 모든 탭 버튼 업데이트
-  const tabs = ['home', 'month', 'week', 'savings', 'fixed-expenses', 'budgets', 'investments', 'receipts', 'debts', 'reports', 'settings'];
+  const tabs = ['home', 'month', 'week', 'savings', 'wallet', 'fixed-expenses', 'budgets', 'investments', 'receipts', 'debts', 'reports', 'settings'];
   tabs.forEach(tabName => {
     const tab = document.getElementById(`tab-${tabName}`);
     if (tab) {
@@ -1223,6 +1798,9 @@ async function switchView(view) {
       break;
     case 'savings':
       await renderSavingsView();
+      break;
+    case 'wallet':
+      await renderWalletView();
       break;
     case 'fixed-expenses':
       await renderFixedExpensesView();
@@ -1383,7 +1961,7 @@ async function renderHomeView() {
       </div>
       
       <!-- 빠른 액션 버튼 -->
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
         <button onclick="switchView('month')" 
                 class="bg-blue-500 hover:bg-blue-600 text-white p-4 rounded-lg shadow-lg transition-all">
           <i class="fas fa-calendar-alt text-2xl mb-2"></i>
@@ -1398,6 +1976,16 @@ async function renderHomeView() {
                 class="bg-purple-500 hover:bg-purple-600 text-white p-4 rounded-lg shadow-lg transition-all">
           <i class="fas fa-piggy-bank text-2xl mb-2"></i>
           <p class="font-medium">${t('savings.title')}</p>
+        </button>
+        <button onclick="switchView('wallet')" 
+                class="bg-cyan-600 hover:bg-cyan-700 text-white p-4 rounded-lg shadow-lg transition-all">
+          <i class="fas fa-wallet text-2xl mb-2"></i>
+          <p class="font-medium">${t('tab.wallet')}</p>
+        </button>
+        <button onclick="switchView('fixed-expenses')" 
+                class="bg-rose-500 hover:bg-rose-600 text-white p-4 rounded-lg shadow-lg transition-all">
+          <i class="fas fa-redo text-2xl mb-2"></i>
+          <p class="font-medium">${t('tab.fixed_expenses')}</p>
         </button>
         <button onclick="switchView('reports')" 
                 class="bg-orange-500 hover:bg-orange-600 text-white p-4 rounded-lg shadow-lg transition-all">
@@ -1418,10 +2006,7 @@ async function renderHomeView() {
 // 홈 화면 카테고리 차트 그리기
 function drawHomeCategoryChart(expenseByCategory, categoryBudgetMap, hasBudgets) {
   const canvas = document.getElementById('home-category-chart');
-  if (!canvas || !isChartLibraryReady()) {
-    console.warn('[Charts] Chart.js is not available for home category chart');
-    return;
-  }
+  if (!canvas) return;
   
   const ctx = canvas.getContext('2d');
   const categories = Object.keys(expenseByCategory).sort((a, b) => expenseByCategory[b] - expenseByCategory[a]);
@@ -1484,10 +2069,7 @@ function drawHomeCategoryChart(expenseByCategory, categoryBudgetMap, hasBudgets)
 // 홈 화면 비교 차트 그리기
 function drawHomeComparisonChart(income, expense, savings) {
   const canvas = document.getElementById('home-comparison-chart');
-  if (!canvas || !isChartLibraryReady()) {
-    console.warn('[Charts] Chart.js is not available for home comparison chart');
-    return;
-  }
+  if (!canvas) return;
   
   const ctx = canvas.getContext('2d');
   
@@ -1544,8 +2126,15 @@ async function renderMonthView() {
   await Promise.all([
     fetchTransactions(`${yearMonth}-01`, `${yearMonth}-${String(daysInMonth).padStart(2, '0')}`),
     fetchBudgetVsSpending(yearMonth),
-    fetchFixedExpenses()
+    fetchFixedExpenses(),
+    fetchWalletAccounts(),
+    fetchSavingsAccounts(),
+    fetchTransfers({
+      startDate: `${yearMonth}-01`,
+      endDate: `${yearMonth}-${String(daysInMonth).padStart(2, '0')}`
+    })
   ]);
+  const fixedExpenseInstances = await fetchFixedExpenseInstances(yearMonth);
   
   // 통계 계산
   const income = state.transactions.filter(t => t.type === 'income').reduce((sum, t) => sum + t.amount, 0);
@@ -1568,6 +2157,13 @@ async function renderMonthView() {
       calendarData[item.date] = {};
     }
     calendarData[item.date][item.type] = item.total;
+  });
+  const fixedExpenseMap = {};
+  fixedExpenseInstances.forEach(instance => {
+    if (!fixedExpenseMap[instance.scheduled_date]) {
+      fixedExpenseMap[instance.scheduled_date] = [];
+    }
+    fixedExpenseMap[instance.scheduled_date].push(instance);
   });
   
   // 예산 vs 지출 데이터 가져오기
@@ -1633,6 +2229,8 @@ async function renderMonthView() {
       
       <!-- 예산 vs 지출 그래프 -->
       ${renderBudgetChart(budgetData, '월별')}
+
+      ${renderMonthlyWalletSnapshot(yearMonth)}
       
       <!-- 저축 목표 진행 상황 -->
       <div class="bg-white p-6 rounded-lg shadow">
@@ -1650,7 +2248,7 @@ async function renderMonthView() {
       <!-- 달력 -->
       <div class="bg-white p-6 rounded-lg shadow">
         <h3 class="text-xl font-bold mb-4">${t('month.monthly_calendar')}</h3>
-        ${renderCalendar(calendarData)}
+        ${renderCalendar(calendarData, fixedExpenseMap)}
       </div>
       
       <!-- 카테고리별 지출 바 그래프 -->
@@ -1702,10 +2300,7 @@ async function renderMonthView() {
 // 파이차트 그리기
 function drawPieChart(canvasId, income, expense, savings) {
   const canvas = document.getElementById(canvasId);
-  if (!canvas || !isChartLibraryReady()) {
-    console.warn('[Charts] Chart.js is not available for pie chart:', canvasId);
-    return;
-  }
+  if (!canvas) return;
   
   const ctx = canvas.getContext('2d');
   const total = income + expense + savings;
@@ -1904,11 +2499,12 @@ async function renderSavingsGoalsProgress() {
 }
 
 // 달력 렌더링 (토요일 파란색, 일요일 빨간색)
-function renderCalendar(calendarData) {
+function renderCalendar(calendarData, fixedExpenseMap = {}) {
   const year = state.currentMonth.getFullYear();
   const month = state.currentMonth.getMonth();
   const daysInMonth = getDaysInMonth(state.currentMonth);
   const firstDay = new Date(year, month, 1).getDay();
+  const todayStr = getDateString(new Date());
   
   let html = '<div class="grid grid-cols-7 gap-2">';
   
@@ -1937,8 +2533,10 @@ function renderCalendar(calendarData) {
   for (let day = 1; day <= daysInMonth; day++) {
     const currentDate = new Date(year, month, day);
     const dateStr = getDateString(currentDate);
+    const isToday = dateStr === todayStr;
     const dayOfWeek = currentDate.getDay();
     const dayData = calendarData[dateStr] || {};
+    const fixedItems = fixedExpenseMap[dateStr] || [];
     
     // 토요일(6) 파란색, 일요일(0) 빨간색
     let dayColor = 'text-gray-700';
@@ -1950,16 +2548,28 @@ function renderCalendar(calendarData) {
     const hasIncome = dayData.income && dayData.income > 0;
     const hasExpense = dayData.expense && dayData.expense > 0;
     const hasSavings = dayData.savings && dayData.savings > 0;
+    const hasFixedExpenses = fixedItems.length > 0;
+    const unpaidFixedCount = fixedItems.filter(item => !item.is_paid).length;
     
     if (hasIncome) dots += '<span class="calendar-dot income"></span>';
     if (hasExpense) dots += '<span class="calendar-dot expense"></span>';
     if (hasSavings) dots += '<span class="calendar-dot savings"></span>';
+    if (hasFixedExpenses) {
+      const fixedColor = unpaidFixedCount > 0 ? '#f59e0b' : '#10b981';
+      dots += `<span class="calendar-dot" style="background:${fixedColor}" title="${fixedItems.length} fixed expenses"></span>`;
+    }
     
     html += `
-      <div class="border rounded cursor-pointer hover:bg-gray-50 calendar-cell-compact" 
+      <div class="border rounded cursor-pointer hover:bg-gray-50 calendar-cell-compact relative ${isToday ? 'calendar-cell-today' : ''}" 
            onclick="openTransactionModal('${dateStr}')">
-        <div class="calendar-day-number text-xs md:text-sm font-semibold ${dayColor}">${day}</div>
-        <div class="calendar-dots-container">
+        ${isToday ? '<div class="calendar-today-glow"></div>' : ''}
+        <div class="calendar-day-number text-xs md:text-sm font-semibold ${dayColor} ${isToday ? 'calendar-day-number-today' : ''}">${day}</div>
+        ${hasFixedExpenses ? `
+          <span class="absolute top-1 right-1 min-w-[18px] h-[18px] px-1 rounded-full text-[10px] flex items-center justify-center z-10 ${unpaidFixedCount > 0 ? 'bg-amber-500 text-white' : 'bg-green-500 text-white'}">
+            ${fixedItems.length}
+          </span>
+        ` : ''}
+        <div class="calendar-dots-container relative z-10">
           ${dots}
         </div>
       </div>
@@ -2091,6 +2701,49 @@ function renderExpenseBarChart(expenseByCategory, period) {
   
   // 최대값 찾기 (바 너비 계산용)
   const maxAmount = Math.max(...expenseByCategory.map(item => item.total));
+  const sourcePalette = ['#7C3AED', '#0EA5E9', '#10B981', '#F97316', '#EF4444', '#14B8A6', '#F59E0B', '#EC4899'];
+  const sourceColorMap = {};
+  let sourceColorIndex = 0;
+
+  const getUsageSourceMeta = (transaction) => {
+    const paymentMethod = transaction.payment_method || 'card';
+    const key = transaction.account_id ? `account-${transaction.account_id}` : `payment-${paymentMethod}`;
+    const fallbackLabel = getPaymentMethodMeta(paymentMethod).label;
+    const label = transaction.account_name || fallbackLabel;
+
+    if (!sourceColorMap[key]) {
+      sourceColorMap[key] = sourcePalette[sourceColorIndex % sourcePalette.length];
+      sourceColorIndex += 1;
+    }
+
+    return {
+      key,
+      label,
+      color: sourceColorMap[key]
+    };
+  };
+
+  const categorySourceBreakdown = state.transactions
+    .filter(transaction => transaction.type === 'expense')
+    .reduce((accumulator, transaction) => {
+      const categoryKey = transaction.category;
+      const sourceMeta = getUsageSourceMeta(transaction);
+
+      if (!accumulator[categoryKey]) {
+        accumulator[categoryKey] = {};
+      }
+
+      if (!accumulator[categoryKey][sourceMeta.key]) {
+        accumulator[categoryKey][sourceMeta.key] = {
+          label: sourceMeta.label,
+          color: sourceMeta.color,
+          total: 0
+        };
+      }
+
+      accumulator[categoryKey][sourceMeta.key].total += Number(transaction.amount || 0);
+      return accumulator;
+    }, {});
   
   const titleKey = period === '월별' ? 'month.monthly_category_spending' : 'week.weekly_category_spending';
   let html = `
@@ -2114,6 +2767,18 @@ function renderExpenseBarChart(expenseByCategory, period) {
     const percentage = totalExpense > 0 ? (item.total / totalExpense * 100) : 0;
     const barWidth = maxAmount > 0 ? (item.total / maxAmount * 100) : 0;
     const color = categoryColors[item.category] || '#6B7280';
+    const sourceSegments = Object.values(categorySourceBreakdown[item.category] || {})
+      .sort((a, b) => b.total - a.total)
+      .map(segment => ({
+        ...segment,
+        percentage: item.total > 0 ? (segment.total / item.total) * 100 : 0
+      }));
+    const renderedSegments = sourceSegments.length > 0 ? sourceSegments : [{
+      label: translateCategoryName(item.category),
+      color,
+      total: item.total,
+      percentage: 100
+    }];
     
     html += `
       <div>
@@ -2131,10 +2796,22 @@ function renderExpenseBarChart(expenseByCategory, period) {
           </div>
         </div>
         <div class="w-full bg-gray-100 rounded-full h-6 overflow-hidden">
-          <div class="h-6 rounded-full transition-all flex items-center px-3" 
-               style="width: ${barWidth}%; background-color: ${color}">
-            ${barWidth > 15 ? `<span class="text-xs text-white font-bold">${formatCurrencyShort(item.total)}</span>` : ''}
+          <div class="h-6 rounded-full transition-all overflow-hidden flex" 
+               style="width: ${barWidth}%; background-color: ${color}20">
+            ${renderedSegments.map(segment => `
+              <div class="h-6" 
+                   style="width: ${segment.percentage}%; background-color: ${segment.color}"
+                   title="${segment.label} · ${segment.percentage.toFixed(1)}% · ${formatCurrency(segment.total)}"></div>
+            `).join('')}
           </div>
+        </div>
+        <div class="mt-2 flex flex-wrap gap-2">
+          ${renderedSegments.map(segment => `
+            <span class="inline-flex items-center gap-1.5 rounded-full bg-gray-50 px-2.5 py-1 text-[11px] font-medium text-gray-700">
+              <span class="inline-block h-2.5 w-2.5 rounded-full" style="background-color: ${segment.color}"></span>
+              ${segment.label} ${segment.percentage.toFixed(0)}%
+            </span>
+          `).join('')}
         </div>
       </div>
     `;
@@ -2158,7 +2835,7 @@ function renderTransactionList(transactions) {
   transactions.forEach(t => {
     const typeColor = t.type === 'income' ? 'blue' : t.type === 'expense' ? 'red' : 'green';
     const typeText = t.type === 'income' ? window.t('common.income') : t.type === 'expense' ? window.t('common.expense') : window.t('transaction.type.savings');
-    const paymentIcon = t.payment_method === 'cash' ? '💵' : '💳';
+    const paymentIcon = t.payment_method === 'cash' ? '💵' : t.payment_method === 'transfer' ? '🏦' : '💳';
     
     html += `
       <div class="flex justify-between items-center p-3 bg-gray-50 rounded hover:bg-gray-100">
@@ -2169,6 +2846,7 @@ function renderTransactionList(transactions) {
             <span class="font-medium">${t.category}</span>
           </div>
           <p class="text-sm text-gray-600">${t.date} ${t.description ? '· ' + t.description : ''}</p>
+          ${t.account_name ? `<p class="text-xs text-cyan-700 mt-1">${t.account_name}</p>` : ''}
         </div>
         <div class="flex items-center gap-3">
           <span class="font-bold text-${typeColor}-600">${t.type === 'income' ? '+' : '-'}${formatCurrency(t.amount)}</span>
@@ -2432,13 +3110,456 @@ async function renderSavingsView() {
   `;
 }
 
+async function renderWalletView() {
+  await fetchWallets();
+
+  const yearMonth = getYearMonth(state.currentMonth || new Date());
+  const daysInMonth = getDaysInMonth(state.currentMonth || new Date());
+  const contentArea = document.getElementById('content-area');
+  const currentWallet = getCurrentWallet();
+
+  if (!currentWallet) {
+    contentArea.innerHTML = `
+      <div class="space-y-6">
+        <section class="bg-white rounded-3xl shadow-lg p-8 text-center">
+          <div class="w-20 h-20 mx-auto rounded-full bg-cyan-100 text-cyan-700 flex items-center justify-center mb-5">
+            <i class="fas fa-wallet text-3xl"></i>
+          </div>
+          <h2 class="text-2xl font-bold text-gray-900">${t('wallet.no_wallets')}</h2>
+          <p class="text-gray-500 mt-3">${t('wallet.no_wallets_desc')}</p>
+          <button onclick="openWalletModal()" class="mt-6 px-6 py-3 bg-cyan-600 text-white rounded-xl hover:bg-cyan-700">
+            <i class="fas fa-plus mr-2"></i>${t('wallet.create_wallet')}
+          </button>
+        </section>
+      </div>
+    `;
+    return;
+  }
+
+  await Promise.all([
+    fetchWalletAccounts(),
+    fetchWalletTransactions(`${yearMonth}-01`, `${yearMonth}-${String(daysInMonth).padStart(2, '0')}`),
+    fetchTransfers({
+      walletId: currentWallet.id,
+      startDate: `${yearMonth}-01`,
+      endDate: `${yearMonth}-${String(daysInMonth).padStart(2, '0')}`
+    })
+  ]);
+
+  const totalBalance = state.accounts.reduce((sum, account) => sum + Number(account.balance || 0), 0);
+  const transferVolume = state.transfers.reduce((sum, transfer) => sum + Number(transfer.amount || 0), 0);
+  const savingsGoalCount = state.accounts.filter(account => Number(account.savings_goal || 0) > 0).length;
+  const recentTransfers = state.transfers.slice(0, 8);
+  const monthlyUsage = state.walletTransactions
+    .filter(transaction => ['expense', 'savings', 'withdrawal'].includes(transaction.type))
+    .sort((a, b) => {
+      if (a.date === b.date) return (b.id || 0) - (a.id || 0);
+      return b.date.localeCompare(a.date);
+    });
+  const unassignedExpenseTransactions = monthlyUsage.filter(transaction => transaction.type === 'expense' && !transaction.account_id);
+  const monthlyUsageTotal = monthlyUsage.reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+  const usageByMethod = ['card', 'cash', 'transfer'].map(method => ({
+    method,
+    total: monthlyUsage
+      .filter(transaction => (transaction.payment_method || 'card') === method)
+      .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0)
+  }));
+  const accountUsageSummary = monthlyUsage.reduce((accumulator, transaction) => {
+    if (!transaction.account_id) return accumulator;
+
+    if (!accumulator[transaction.account_id]) {
+      accumulator[transaction.account_id] = { total: 0, count: 0 };
+    }
+
+    accumulator[transaction.account_id].total += Number(transaction.amount || 0);
+    accumulator[transaction.account_id].count += 1;
+    return accumulator;
+  }, {});
+  const expenseCategoryUsage = Object.values(
+    monthlyUsage
+      .filter(transaction => transaction.type === 'expense')
+      .reduce((accumulator, transaction) => {
+        const categoryKey = transaction.category || t('category.expense.other');
+        if (!accumulator[categoryKey]) {
+          accumulator[categoryKey] = {
+            category: categoryKey,
+            total: 0,
+            count: 0,
+            methods: { card: 0, cash: 0, transfer: 0 },
+            accounts: {}
+          };
+        }
+
+        accumulator[categoryKey].total += Number(transaction.amount || 0);
+        accumulator[categoryKey].count += 1;
+
+        const paymentMethod = transaction.payment_method || 'card';
+        accumulator[categoryKey].methods[paymentMethod] = (accumulator[categoryKey].methods[paymentMethod] || 0) + Number(transaction.amount || 0);
+        const accountKey = transaction.account_id ? String(transaction.account_id) : 'unassigned';
+        if (!accumulator[categoryKey].accounts[accountKey]) {
+          accumulator[categoryKey].accounts[accountKey] = {
+            name: getTransactionAccountLabel(transaction),
+            total: 0
+          };
+        }
+        accumulator[categoryKey].accounts[accountKey].total += Number(transaction.amount || 0);
+        return accumulator;
+      }, {})
+  ).sort((a, b) => b.total - a.total);
+
+  contentArea.innerHTML = `
+    <div class="space-y-6">
+      <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+        <div>
+          <h2 class="text-2xl font-bold text-gray-800">${t('wallet.title')}</h2>
+          <p class="text-sm text-gray-500 mt-1">${currentWallet.name} · ${t('wallet.subtitle')}</p>
+          <p class="text-xs text-gray-400 mt-2">${yearMonth}</p>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button onclick="openWalletModal()" class="px-4 py-2 bg-white text-cyan-700 border border-cyan-200 rounded-lg hover:bg-cyan-50">
+            <i class="fas fa-layer-group mr-2"></i>${t('wallet.create_wallet')}
+          </button>
+          <button onclick="openTransferModal()" class="px-4 py-2 bg-cyan-600 text-white rounded-lg hover:bg-cyan-700">
+            <i class="fas fa-exchange-alt mr-2"></i>${t('wallet.new_transfer')}
+          </button>
+          <button onclick="openWalletAccountModal()" class="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600">
+            <i class="fas fa-plus mr-2"></i>${t('wallet.add_account')}
+          </button>
+        </div>
+      </div>
+
+      <section class="bg-white rounded-2xl shadow p-5">
+        <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <p class="text-sm font-semibold text-cyan-700">${t('wallet.current_wallet')}</p>
+            <h3 class="text-2xl font-bold text-gray-900 mt-1">${currentWallet.name}</h3>
+            <p class="text-sm text-gray-500 mt-1">${currentWallet.description || t('wallet.wallet_selector_desc')}</p>
+          </div>
+          <div class="w-full md:w-80">
+            <label class="block text-xs font-medium text-gray-500 mb-2">${t('wallet.switch_wallet')}</label>
+            <select onchange="handleWalletChange(this.value)" class="w-full px-4 py-3 border border-gray-200 rounded-xl bg-gray-50">
+              ${state.wallets.map(wallet => `
+                <option value="${wallet.id}" ${Number(wallet.id) === Number(state.currentWalletId) ? 'selected' : ''}>
+                  ${wallet.name} · ${wallet.account_count || 0}${getLanguage() === 'ko' ? '개 계좌' : ' accounts'}
+                </option>
+              `).join('')}
+            </select>
+          </div>
+        </div>
+      </section>
+
+      ${renderWalletBulkAssignment(unassignedExpenseTransactions)}
+
+      ${renderWalletAccountOverview(totalBalance, accountUsageSummary)}
+
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+        <div class="bg-white rounded-lg shadow p-5">
+          <p class="text-sm text-gray-500">${t('home.total_assets')}</p>
+          <p class="text-3xl font-bold text-gray-900 mt-2">${formatCurrencyByCode(totalBalance)}</p>
+        </div>
+        <div class="bg-white rounded-lg shadow p-5">
+          <p class="text-sm text-gray-500">${t('wallet.account_count')}</p>
+          <p class="text-3xl font-bold text-cyan-700 mt-2">${state.accounts.length}</p>
+        </div>
+        <div class="bg-white rounded-lg shadow p-5">
+          <p class="text-sm text-gray-500">${t('wallet.member_count')}</p>
+          <p class="text-3xl font-bold text-slate-700 mt-2">${currentWallet.member_count || 1}</p>
+        </div>
+        <div class="bg-white rounded-lg shadow p-5">
+          <p class="text-sm text-gray-500">${t('wallet.monthly_transfer_volume')}</p>
+          <p class="text-3xl font-bold text-violet-700 mt-2">${formatCurrencyByCode(transferVolume)}</p>
+        </div>
+        <div class="bg-white rounded-lg shadow p-5">
+          <p class="text-sm text-gray-500">${t('wallet.goal_count')}</p>
+          <p class="text-3xl font-bold text-green-700 mt-2">${savingsGoalCount}${getLanguage() === 'ko' ? '개' : ''}</p>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        <section class="xl:col-span-2 bg-white rounded-lg shadow p-6">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-xl font-bold text-gray-800">${t('wallet.accounts')}</h3>
+            <span class="text-sm text-gray-500">${state.accounts.length}${getLanguage() === 'ko' ? '개' : ''}</span>
+          </div>
+
+          ${state.accounts.length === 0 ? `
+            <div class="border border-dashed border-gray-300 rounded-xl p-8 text-center">
+              <i class="fas fa-wallet text-4xl text-gray-300 mb-3"></i>
+              <p class="text-gray-500 mb-4">${t('wallet.no_accounts')}</p>
+              <button onclick="openWalletAccountModal()" class="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600">
+                ${t('wallet.add_first_account')}
+              </button>
+            </div>
+          ` : `
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              ${state.accounts.map(account => {
+                const meta = getWalletAccountTypeMeta(account.type);
+                const accentClasses = getWalletAccentClasses(meta.accent);
+
+                return `
+                  <article class="border border-gray-200 rounded-xl p-4 hover:shadow-md transition">
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="flex items-start gap-3">
+                        <div class="w-12 h-12 rounded-xl flex items-center justify-center ${accentClasses.panel}">
+                          <i class="fas ${meta.icon} text-lg"></i>
+                        </div>
+                        <div>
+                          <h4 class="text-lg font-semibold text-gray-900">${account.name}</h4>
+                          <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium mt-2 ${accentClasses.badge}">
+                            ${meta.label}
+                          </span>
+                          ${account.bank_name ? `<p class="text-xs text-gray-500 mt-2">${account.bank_name}</p>` : ''}
+                        </div>
+                      </div>
+                      <div class="flex items-center gap-3 text-sm">
+                        <button onclick="openWalletAccountModal(${account.id})" class="text-blue-500 hover:text-blue-700" title="${t('wallet.edit_account')}">
+                          <i class="fas fa-pen"></i>
+                        </button>
+                        <button onclick="deleteWalletAccount(${account.id})" class="text-red-500 hover:text-red-700" title="${t('common.delete')}">
+                          <i class="fas fa-trash"></i>
+                        </button>
+                      </div>
+                    </div>
+
+                    <div class="mt-5">
+                      <p class="text-sm text-gray-500">${t('common.balance')}</p>
+                      <p class="text-2xl font-bold text-gray-900 mt-1">${formatCurrencyByCode(account.balance, account.currency)}</p>
+                    </div>
+
+                    ${Number(account.savings_goal || 0) > 0 ? `
+                      <div class="mt-4 rounded-xl bg-green-50 border border-green-100 p-3">
+                        <p class="text-xs text-green-700">${t('wallet.linked_goal')}</p>
+                        <p class="text-sm font-semibold text-green-800 mt-1">${formatCurrencyByCode(account.savings_goal, account.currency)}</p>
+                      </div>
+                    ` : ''}
+
+                    <div class="mt-4 flex items-center justify-between text-sm">
+                      <span class="text-gray-400">${account.currency || (state.settings.currency || 'KRW')}</span>
+                      <button onclick="openTransferModal(${account.id})" class="text-cyan-600 hover:text-cyan-700 font-medium">
+                        ${t('wallet.new_transfer')}
+                      </button>
+                    </div>
+                  </article>
+                `;
+              }).join('')}
+            </div>
+          `}
+        </section>
+
+        <div class="space-y-6">
+          <section class="bg-white rounded-lg shadow p-6">
+            <h3 class="text-xl font-bold text-gray-800 mb-4">${t('wallet.usage_by_method')}</h3>
+            <div class="space-y-3">
+              ${usageByMethod.map(item => {
+                const meta = getPaymentMethodMeta(item.method);
+                return `
+                  <div class="flex items-center justify-between rounded-xl border border-gray-100 p-4">
+                    <div class="flex items-center gap-3">
+                      <div class="w-10 h-10 rounded-full flex items-center justify-center ${meta.classes}">
+                        <i class="fas ${meta.icon}"></i>
+                      </div>
+                      <span class="font-medium text-gray-900">${meta.label}</span>
+                    </div>
+                    <span class="text-lg font-bold text-gray-900">${formatCurrencyByCode(item.total)}</span>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+          </section>
+
+          <section class="bg-white rounded-lg shadow p-6">
+            <h3 class="text-xl font-bold text-gray-800 mb-4">${t('wallet.category_usage')}</h3>
+            ${renderWalletCategoryUsage(expenseCategoryUsage)}
+          </section>
+
+          <section class="bg-white rounded-lg shadow p-6">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-xl font-bold text-gray-800">${t('wallet.recent_transfers')}</h3>
+              <button onclick="openTransferModal()" class="text-sm text-cyan-600 hover:text-cyan-700 font-medium">
+                ${t('wallet.new_transfer')}
+              </button>
+            </div>
+
+            ${recentTransfers.length === 0 ? `
+              <div class="border border-dashed border-gray-300 rounded-xl p-8 text-center">
+                <i class="fas fa-exchange-alt text-4xl text-gray-300 mb-3"></i>
+                <p class="text-gray-500">${t('wallet.no_transfers')}</p>
+              </div>
+            ` : `
+              <div class="space-y-3">
+                ${recentTransfers.map(transfer => `
+                  <div class="border border-gray-100 rounded-xl p-4">
+                    <div class="flex items-center justify-between gap-3">
+                      <div>
+                        <p class="font-semibold text-gray-900">${transfer.from_account_name || '-'}</p>
+                        <p class="text-xs text-gray-500 mt-1">
+                          <i class="fas fa-arrow-right mr-1"></i>${transfer.to_account_name || '-'}
+                        </p>
+                      </div>
+                      <div class="text-right">
+                        <p class="font-bold text-cyan-700">${formatCurrencyByCode(transfer.amount)}</p>
+                        <p class="text-xs text-gray-500 mt-1">${transfer.transfer_date}</p>
+                      </div>
+                    </div>
+                    ${transfer.description ? `
+                      <p class="text-sm text-gray-500 mt-3">${transfer.description}</p>
+                    ` : ''}
+                  </div>
+                `).join('')}
+              </div>
+            `}
+          </section>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 xl:grid-cols-5 gap-6">
+        <section class="xl:col-span-3 bg-white rounded-lg shadow p-6">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-xl font-bold text-gray-800">${t('wallet.recent_usage')}</h3>
+            <div class="text-right">
+              <span class="text-sm text-gray-500">${yearMonth}</span>
+              <p class="text-lg font-bold text-amber-700 mt-1">${formatCurrencyByCode(monthlyUsageTotal)}</p>
+            </div>
+          </div>
+
+          ${monthlyUsage.length === 0 ? `
+            <div class="border border-dashed border-gray-300 rounded-xl p-8 text-center">
+              <i class="fas fa-receipt text-4xl text-gray-300 mb-3"></i>
+              <p class="text-gray-500">${t('wallet.no_usage')}</p>
+            </div>
+          ` : `
+            <div class="space-y-3">
+              ${monthlyUsage.slice(0, 8).map(transaction => {
+                const meta = getPaymentMethodMeta(transaction.payment_method || 'card');
+                return `
+                  <div class="border border-gray-100 rounded-xl p-4 flex items-center justify-between gap-4">
+                    <div class="flex items-center gap-3 min-w-0">
+                      <div class="w-10 h-10 rounded-full flex items-center justify-center ${meta.classes}">
+                        <i class="fas ${meta.icon}"></i>
+                      </div>
+                      <div class="min-w-0">
+                        <p class="font-semibold text-gray-900 truncate">${transaction.category || t('category.expense.other')}</p>
+                        <p class="text-xs text-gray-500 mt-1 truncate">
+                          ${transaction.date} · ${meta.label}${transaction.description ? ` · ${transaction.description}` : ''}
+                        </p>
+                        <p class="text-xs text-cyan-700 mt-1 truncate">
+                          ${getTransactionAccountLabel(transaction)}
+                        </p>
+                        ${transaction.savings_account_name ? `
+                          <p class="text-xs text-green-600 mt-1 truncate">
+                            ${t('wallet.linked_goal')}: ${transaction.savings_account_name}
+                          </p>
+                        ` : ''}
+                      </div>
+                    </div>
+                    <div class="text-right">
+                      <p class="font-bold ${transaction.type === 'savings' ? 'text-green-700' : 'text-rose-600'}">${formatCurrencyByCode(transaction.amount)}</p>
+                      <p class="text-xs text-gray-500 mt-1">${transaction.type === 'savings' ? t('transaction.type.savings') : t('common.expense')}</p>
+                    </div>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+          `}
+        </section>
+
+        <section class="xl:col-span-2 bg-white rounded-lg shadow p-6">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-xl font-bold text-gray-800">${t('wallet.savings_goals')}</h3>
+            <span class="text-sm text-green-600 font-medium">${savingsGoalCount}${getLanguage() === 'ko' ? '개 목표' : ' goals'}</span>
+          </div>
+          ${renderSavingsGoalCards(null, state.accounts)}
+        </section>
+      </div>
+    </div>
+  `;
+}
+
+async function handleWalletChange(walletId) {
+  setCurrentWalletId(walletId);
+  await renderWalletView();
+}
+
+function openWalletModal() {
+  const modalContainer = document.getElementById('modal-container');
+
+  modalContainer.innerHTML = `
+    <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onclick="closeModal(event)">
+      <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4" onclick="event.stopPropagation()">
+        <h3 class="text-xl font-bold mb-4">${t('wallet.create_wallet')}</h3>
+        <form onsubmit="handleWalletCreate(event)" class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('wallet.wallet_name')}</label>
+            <input type="text" name="name" class="w-full px-4 py-2 border rounded" required maxlength="50">
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('common.description')}</label>
+            <textarea name="description" class="w-full px-4 py-2 border rounded min-h-[96px]" maxlength="160"></textarea>
+          </div>
+          <div class="flex gap-2">
+            <button type="submit" class="flex-1 py-3 bg-cyan-600 text-white rounded hover:bg-cyan-700 font-medium">
+              ${t('common.create')}
+            </button>
+            <button type="button" onclick="closeModal()" class="flex-1 py-3 bg-gray-300 text-gray-700 rounded hover:bg-gray-400 font-medium">
+              ${t('common.cancel')}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `;
+}
+
+async function handleWalletCreate(event) {
+  event.preventDefault();
+
+  const formData = new FormData(event.target);
+  const nameValidation = validateString(formData.get('name'), 1, 50, t('wallet.wallet_name'));
+  if (!nameValidation.valid) {
+    showValidationError(nameValidation.error);
+    return;
+  }
+
+  try {
+    const response = await axios.post('/api/wallets', {
+      name: nameValidation.value,
+      description: sanitizeString(formData.get('description'))
+    });
+
+    if (response.data.success) {
+      setCurrentWalletId(response.data.wallet?.id || null);
+      closeModal();
+      await renderWalletView();
+    }
+  } catch (error) {
+    alert(error.response?.data?.error || '공유지갑 생성 중 오류가 발생했습니다.');
+  }
+}
+
 // 고정지출 뷰 렌더링
 async function renderFixedExpensesView() {
   await fetchFixedExpenses();
   
-  // 현재 월의 고정지출 반복 인스턴스 가져오기
-  const currentYearMonth = getYearMonth(new Date());
+  const currentYearMonth = getYearMonth(state.currentMonth);
   const fixedExpenseInstances = await fetchFixedExpenseInstances(currentYearMonth);
+  const today = getDateString(new Date());
+  const summaryGroups = getFixedExpenseSummaryGroups(fixedExpenseInstances);
+  const expectedTotal = fixedExpenseInstances.reduce((sum, instance) => sum + Number(instance.amount || 0), 0);
+  const paidCount = fixedExpenseInstances.filter(instance => instance.is_paid).length;
+  const dueTodayCount = fixedExpenseInstances.filter(instance => !instance.is_paid && instance.scheduled_date === today).length;
+  const overdueCount = fixedExpenseInstances.filter(instance => !instance.is_paid && instance.scheduled_date < today).length;
+  const summaryCards = [
+    { label: t('fixed.summary.expected_month'), value: formatCurrency(expectedTotal), tone: 'from-slate-600 to-slate-800' },
+    { label: t('fixed.summary.paid_month'), value: `${paidCount}${getLanguage() === 'ko' ? '건' : ''}`, tone: 'from-green-500 to-green-700' },
+    { label: t('fixed.summary.due_today'), value: `${dueTodayCount}${getLanguage() === 'ko' ? '건' : ''}`, tone: 'from-amber-400 to-amber-600' },
+    { label: t('fixed.summary.overdue'), value: `${overdueCount}${getLanguage() === 'ko' ? '건' : ''}`, tone: 'from-rose-500 to-rose-700' }
+  ];
+  const sections = [
+    { key: 'daily', title: t('fixed.group.daily'), items: summaryGroups.daily },
+    { key: 'weekly', title: t('fixed.group.weekly'), items: summaryGroups.weekly },
+    { key: 'monthly', title: t('fixed.group.monthly'), items: summaryGroups.monthly },
+    { key: 'yearly', title: t('fixed.group.yearly'), items: summaryGroups.yearly }
+  ];
   
   const contentArea = document.getElementById('content-area');
   contentArea.innerHTML = `
@@ -2464,6 +3585,15 @@ async function renderFixedExpensesView() {
           </div>
         </div>
       </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+        ${summaryCards.map(card => `
+          <div class="bg-gradient-to-br ${card.tone} text-white p-5 rounded-xl shadow-lg">
+            <p class="text-sm text-white/80">${card.label}</p>
+            <p class="text-3xl font-bold mt-2">${card.value}</p>
+          </div>
+        `).join('')}
+      </div>
       
       <!-- 월 선택 네비게이션 -->
       <div class="flex items-center justify-between bg-white p-4 rounded-lg shadow">
@@ -2477,70 +3607,228 @@ async function renderFixedExpensesView() {
           <i class="fas fa-chevron-right"></i>
         </button>
       </div>
-      
-      <!-- 고정지출 인스턴스 목록 -->
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        ${fixedExpenseInstances.map((instance, index) => {
-          // 체크박스 ID를 날짜 기반으로 고유하게 생성
-          const checkboxId = 'check-' + instance.id + '-' + instance.scheduled_date.replace(/-/g, '');
-          
-          return `
-          <div class="bg-white p-5 rounded-lg shadow hover:shadow-md transition">
-            <div class="flex items-center justify-between mb-3">
-              <div class="flex-1">
-                <h4 class="text-lg font-bold text-gray-800">${instance.name}</h4>
-                <p class="text-2xl font-bold text-red-600">${formatCurrency(instance.amount)}</p>
-              </div>
-              <div class="flex gap-2">
-                <button onclick="openEditFixedExpenseModal({id: ${instance.id}, name: '${instance.name.replace(/'/g, "\'")}', amount: ${instance.amount}, category: '${instance.category}', frequency: '${instance.frequency}', week_of_month: ${instance.week_of_month || 'null'}, day_of_week: ${instance.day_of_week ?? 'null'}, payment_day: ${instance.payment_day || 'null'}})" 
-                        class="text-blue-500 hover:text-blue-700" title="${t('common.edit')}">
-                  <i class="fas fa-edit"></i>
-                </button>
-                <button onclick="deleteFixedExpense(${instance.id})" class="text-red-500 hover:text-red-700" title="${t('common.delete')}">
-                  <i class="fas fa-trash"></i>
-                </button>
-              </div>
-            </div>
-            
-            <div class="flex items-center gap-2 text-sm text-gray-600 mb-2">
-              <i class="fas fa-calendar-alt"></i>
-              <span>${instance.scheduled_date}</span>
-              <span class="text-xs px-2 py-0.5 rounded-full ${instance.frequency === 'monthly_day' ? 'bg-blue-100 text-blue-600' : 'bg-green-100 text-green-600'}">
-                ${instance.frequency === 'monthly_day' ? `${t('fixed.monthly_day')} ${instance.payment_day}${t('fixed.day_suffix')}` : `${t('fixed.weekly')} ${getDayName(instance.day_of_week)}${t('fixed.day_of_week_suffix')}`}
-              </span>
-            </div>
-            
-            <div class="flex items-center gap-2 text-sm text-gray-500">
-              <i class="fas fa-tag"></i>
-              <span>${instance.category}</span>
-            </div>
+
+      ${sections.map(section => `
+        <section class="bg-white rounded-lg shadow p-6">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-xl font-bold text-gray-800">${section.title}</h3>
+            <span class="text-sm text-gray-500">${section.items.length}${getLanguage() === 'ko' ? '건' : ''}</span>
           </div>
-        `;
-        }).join('')}
-      </div>
-      
+
+          ${section.items.length === 0 ? `
+            <p class="text-sm text-gray-500 py-4">${t('fixed.no_items_in_group')}</p>
+          ` : `
+            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+              ${section.items.map(instance => {
+                const checkboxId = 'check-' + instance.id + '-' + instance.scheduled_date.replace(/-/g, '');
+                const status = getFixedExpenseStatusMeta(instance);
+
+                return `
+                  <article class="border border-gray-200 rounded-xl p-4 hover:shadow-md transition">
+                    <div class="flex items-start justify-between gap-3">
+                      <div>
+                        <h4 class="text-lg font-bold text-gray-800">${instance.name}</h4>
+                        <p class="text-2xl font-bold text-rose-600 mt-1">${formatCurrency(instance.amount)}</p>
+                      </div>
+                      <span class="text-xs px-2.5 py-1 rounded-full font-medium ${status.classes}">
+                        ${status.label}
+                      </span>
+                    </div>
+
+                    <div class="mt-4 space-y-2 text-sm text-gray-600">
+                      <div class="flex items-center gap-2">
+                        <i class="fas fa-calendar-alt"></i>
+                        <span>${instance.scheduled_date}</span>
+                      </div>
+                      <div class="flex items-center gap-2">
+                        <i class="fas fa-repeat"></i>
+                        <span>${getFixedExpenseScheduleLabel(instance)}</span>
+                      </div>
+                      <div class="flex items-center gap-2">
+                        <i class="fas fa-tag"></i>
+                        <span>${instance.category}</span>
+                      </div>
+                    </div>
+
+                    <div class="mt-5 flex items-center justify-between gap-3">
+                      <label class="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                        <input
+                          id="${checkboxId}"
+                          type="checkbox"
+                          class="w-4 h-4"
+                          ${instance.is_paid ? 'checked' : ''}
+                          onchange="handleFixedExpenseCheck('${checkboxId}', ${instance.id}, '${instance.scheduled_date}', this.checked)"
+                        />
+                        <span>${instance.is_paid ? t('fixed.undo_payment') : t('fixed.pay')}</span>
+                      </label>
+                      <div class="flex items-center gap-3 text-sm">
+                        <button onclick="openEditFixedExpenseModal({id: ${instance.id}, name: '${instance.name.replace(/'/g, "\\'")}', amount: ${instance.amount}, category: '${instance.category.replace(/'/g, "\\'")}', frequency: '${instance.frequency}', week_of_month: ${instance.week_of_month || 'null'}, day_of_week: ${instance.day_of_week ?? 'null'}, payment_day: ${instance.payment_day || 'null'}, month_of_year: ${instance.month_of_year || 'null'}})" class="text-blue-500 hover:text-blue-700" title="${t('common.edit')}">
+                          <i class="fas fa-edit"></i>
+                        </button>
+                        <button onclick="deleteFixedExpense(${instance.id})" class="text-red-500 hover:text-red-700" title="${t('common.delete')}">
+                          <i class="fas fa-trash"></i>
+                        </button>
+                      </div>
+                    </div>
+                  </article>
+                `;
+              }).join('')}
+            </div>
+          `}
+        </section>
+      `).join('')}
+
       ${fixedExpenseInstances.length === 0 ? `<p class="text-center text-gray-500 py-8">${t('ui.no_fixed_expenses')}</p>` : ''}
     </div>
   `;
 }
 
-// 고정지출 체크박스 핸들러 - 단순 확인용
+// 고정지출 체크박스 핸들러
 async function handleFixedExpenseCheck(checkboxId, expenseId, date, isChecked) {
-  // 체크박스 상태만 저장 (거래내역에 추가하지 않음)
   try {
     if (isChecked) {
-      // 체크 시: 지불 표시만 저장
-      await axios.post(`/api/fixed-expenses/${expenseId}/mark-paid`, { date });
-      renderFixedExpensesView();
+      await axios.post(`/api/fixed-expenses/${expenseId}/pay`, { payment_date: date });
     } else {
-      // 체크 해제 시: 지불 표시 제거
       await axios.delete(`/api/fixed-expenses/${expenseId}/mark-paid/${date}`);
-      renderFixedExpensesView();
     }
+    await refreshAfterFixedExpenseAction();
   } catch (error) {
     console.error('체크박스 상태 저장 오류:', error);
     const checkbox = document.getElementById(checkboxId);
     if (checkbox) checkbox.checked = !isChecked;
+  }
+}
+
+async function refreshAfterFixedExpenseAction() {
+  switch (state.activeView) {
+    case 'month':
+      await renderMonthView();
+      break;
+    case 'fixed-expenses':
+      await renderFixedExpensesView();
+      break;
+    default:
+      await switchView(state.activeView);
+      break;
+  }
+}
+
+async function checkFixedExpenseReminders(force = false) {
+  if (!state.isAuthenticated) return;
+
+  const today = getDateString(new Date());
+  const storageKey = `fixed_expense_reminder_${today}`;
+
+  if (!force && sessionStorage.getItem(storageKey) === 'shown') {
+    return;
+  }
+
+  const currentMonth = new Date();
+  const previousMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1);
+  const [previousInstances, currentInstances] = await Promise.all([
+    fetchFixedExpenseInstances(getYearMonth(previousMonth)),
+    fetchFixedExpenseInstances(getYearMonth(currentMonth))
+  ]);
+
+  const dueItems = [...previousInstances, ...currentInstances].filter((item, index, array) => {
+    const isDue = !item.is_paid && item.scheduled_date <= today;
+    const isFirst = array.findIndex(candidate => candidate.id === item.id && candidate.scheduled_date === item.scheduled_date) === index;
+    return isDue && isFirst;
+  });
+
+  if (dueItems.length === 0) {
+    sessionStorage.removeItem(storageKey);
+    return;
+  }
+
+  sessionStorage.setItem(storageKey, 'shown');
+  showFixedExpenseReminderModal(dueItems);
+
+  if ('Notification' in window && Notification.permission === 'granted') {
+    const title = t('fixed.reminder_title');
+    const body = `${dueItems.length}${getLanguage() === 'ko' ? '건의' : ''} ${t('fixed.reminder_desc')}`;
+    new Notification(title, { body });
+  }
+}
+
+function showFixedExpenseReminderModal(items) {
+  const existingModal = document.getElementById('fixed-expense-reminder-modal');
+  if (existingModal) {
+    existingModal.remove();
+  }
+
+  const modal = document.createElement('div');
+  modal.id = 'fixed-expense-reminder-modal';
+  modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+  modal.innerHTML = `
+    <div class="bg-white rounded-xl shadow-xl p-6 max-w-lg w-full mx-4" onclick="event.stopPropagation()">
+      <div class="flex items-start justify-between gap-4 mb-4">
+        <div>
+          <h3 class="text-xl font-bold text-gray-900">${t('fixed.reminder_title')}</h3>
+          <p class="text-sm text-gray-500 mt-1">${t('fixed.reminder_desc')}</p>
+        </div>
+        <button onclick="closeFixedExpenseReminderModal()" class="text-gray-400 hover:text-gray-600">
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+
+      <div class="space-y-3 max-h-[60vh] overflow-y-auto">
+        ${items.map(item => {
+          const status = getFixedExpenseStatusMeta(item);
+          return `
+            <div class="border border-gray-200 rounded-lg p-4">
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <p class="font-semibold text-gray-900">${item.name}</p>
+                  <p class="text-sm text-gray-500 mt-1">${item.scheduled_date} · ${getFixedExpenseScheduleLabel(item)}</p>
+                  <p class="text-sm text-rose-600 font-bold mt-2">${formatCurrency(item.amount)}</p>
+                </div>
+                <span class="text-xs px-2.5 py-1 rounded-full font-medium ${status.classes}">
+                  ${status.label}
+                </span>
+              </div>
+              <div class="mt-4 flex justify-end">
+                <button onclick="handleReminderFixedExpensePayment(${item.id}, '${item.scheduled_date}')" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                  ${t('fixed.pay')}
+                </button>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+
+      <div class="mt-5 flex justify-end">
+        <button onclick="closeFixedExpenseReminderModal()" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">
+          ${t('fixed.reminder_later')}
+        </button>
+      </div>
+    </div>
+  `;
+
+  modal.addEventListener('click', (event) => {
+    if (event.target === modal) {
+      closeFixedExpenseReminderModal();
+    }
+  });
+
+  document.body.appendChild(modal);
+}
+
+function closeFixedExpenseReminderModal() {
+  const modal = document.getElementById('fixed-expense-reminder-modal');
+  if (modal) {
+    modal.remove();
+  }
+}
+
+async function handleReminderFixedExpensePayment(expenseId, paymentDate) {
+  try {
+    await axios.post(`/api/fixed-expenses/${expenseId}/pay`, { payment_date: paymentDate });
+    closeFixedExpenseReminderModal();
+    await refreshAfterFixedExpenseAction();
+    await checkFixedExpenseReminders(true);
+  } catch (error) {
+    alert(error.response?.data?.error || t('common.error'));
   }
 }
 
@@ -3008,7 +4296,10 @@ async function openEditTransactionModal(transactionId) {
     return;
   }
   
-  await fetchSavingsAccounts();
+  await Promise.all([
+    fetchSavingsAccounts(),
+    fetchWalletAccounts()
+  ]);
   
   const modalContainer = document.getElementById('modal-container');
   
@@ -3054,6 +4345,8 @@ async function openEditTransactionModal(transactionId) {
               ).join('')}
             </select>
           </div>
+
+          ${renderTransactionAccountSelect(transaction.account_id)}
           
           <div id="edit-category-select-${transactionId}">
             <label class="block text-sm font-medium mb-2">카테고리</label>
@@ -3088,6 +4381,7 @@ async function openEditTransactionModal(transactionId) {
             <select name="payment_method" class="w-full px-4 py-2 border rounded" required>
               <option value="card" ${(transaction.payment_method || 'card') === 'card' ? 'selected' : ''}>카드</option>
               <option value="cash" ${transaction.payment_method === 'cash' ? 'selected' : ''}>현금</option>
+              <option value="transfer" ${transaction.payment_method === 'transfer' ? 'selected' : ''}>계좌이체</option>
             </select>
           </div>
           
@@ -3182,7 +4476,8 @@ async function handleEditTransactionSubmit(event, transactionId) {
     date: dateValidation.value,
     description: sanitizeString(descriptionValue),
     payment_method: formData.get('payment_method') || 'card',
-    savings_account_id: formData.get('savings_account_id') || null
+    savings_account_id: formData.get('savings_account_id') || null,
+    account_id: formData.get('account_id') || null
   };
   
   try {
@@ -4649,10 +5944,6 @@ async function loadCategoryTransactions(category) {
 // 바 차트 그리기 함수들
 function drawYearlyBarChart(data) {
   const ctx = document.getElementById('report-chart');
-  if (!ctx || !isChartLibraryReady()) {
-    console.warn('[Charts] Chart.js is not available for yearly chart');
-    return;
-  }
   
   if (reportChart) {
     reportChart.destroy();
@@ -4724,10 +6015,6 @@ function drawYearlyBarChart(data) {
 
 function drawCategoryBarChart(data, monthLabel) {
   const ctx = document.getElementById('report-chart');
-  if (!ctx || !isChartLibraryReady()) {
-    console.warn('[Charts] Chart.js is not available for category chart');
-    return;
-  }
   
   if (reportChart) {
     reportChart.destroy();
@@ -5004,7 +6291,10 @@ async function openTransactionModal(date) {
   const modalContainer = document.getElementById('modal-container');
   const selectedDate = date || getDateString(new Date());
   
-  await fetchSavingsAccounts();
+  await Promise.all([
+    fetchSavingsAccounts(),
+    fetchWalletAccounts()
+  ]);
   
   modalContainer.innerHTML = `
     <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onclick="closeModal(event)">
@@ -5042,6 +6332,8 @@ async function openTransactionModal(date) {
               ${state.savingsAccounts.map(acc => `<option value="${acc.id}">${acc.name}</option>`).join('')}
             </select>
           </div>
+
+          ${renderTransactionAccountSelect()}
           
           <div>
             <label class="block text-sm font-medium mb-2">${t('transaction.category')}</label>
@@ -5072,6 +6364,7 @@ async function openTransactionModal(date) {
             <select name="payment_method" class="w-full px-4 py-2 border rounded" required>
               <option value="card">${t('payment.card')}</option>
               <option value="cash">${t('payment.cash')}</option>
+              <option value="transfer">${t('payment.transfer')}</option>
             </select>
           </div>
           
@@ -5136,7 +6429,8 @@ async function handleTransactionSubmit(event) {
     description: sanitizeString(descriptionValue),
     date: dateValidation.value,
     payment_method: formData.get('payment_method') || 'card',
-    savings_account_id: formData.get('savings_account_id') || null
+    savings_account_id: formData.get('savings_account_id') || null,
+    account_id: formData.get('account_id') || null
   };
   
   try {
@@ -5221,6 +6515,225 @@ async function deleteSavingsAccount(id) {
   }
 }
 
+function openWalletAccountModal(accountId = null) {
+  if (!state.currentWalletId) {
+    alert(t('wallet.select_wallet_first'));
+    return;
+  }
+
+  const modalContainer = document.getElementById('modal-container');
+  const account = accountId ? state.accounts.find(item => item.id === accountId) : null;
+  const accountTypes = getWalletAccountTypes();
+
+  modalContainer.innerHTML = `
+    <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onclick="closeModal(event)">
+      <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4 max-h-[90vh] overflow-y-auto" onclick="event.stopPropagation()">
+        <h3 class="text-xl font-bold mb-4">${account ? t('wallet.edit_account') : t('wallet.add_account')}</h3>
+        <form onsubmit="handleWalletAccountSubmit(event, ${account ? account.id : 'null'})" class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('form.account_name')}</label>
+            <input type="text" name="name" value="${account?.name || ''}" class="w-full px-4 py-2 border rounded" required>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('wallet.account_type')}</label>
+            <select name="type" class="w-full px-4 py-2 border rounded" required>
+              ${accountTypes.map(type => `
+                <option value="${type.value}" ${account?.type === type.value ? 'selected' : ''}>${type.label}</option>
+              `).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('wallet.bank_name')}</label>
+            <input type="text" name="bank_name" value="${account?.bank_name || ''}" class="w-full px-4 py-2 border rounded" maxlength="50">
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('common.balance')}</label>
+            <input type="number" name="balance" value="${account?.balance || 0}" class="w-full px-4 py-2 border rounded" min="0" step="0.01" required>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('savings.target')}</label>
+            <input type="number" name="savings_goal" value="${account?.savings_goal || 0}" class="w-full px-4 py-2 border rounded" min="0" step="0.01">
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('common.description')}</label>
+            <textarea name="description" class="w-full px-4 py-2 border rounded min-h-[96px]" maxlength="160">${account?.description || ''}</textarea>
+          </div>
+          <div class="flex gap-2">
+            <button type="submit" class="flex-1 py-3 bg-blue-500 text-white rounded hover:bg-blue-600 font-medium">
+              ${account ? t('common.save') : t('common.add')}
+            </button>
+            <button type="button" onclick="closeModal()" class="flex-1 py-3 bg-gray-300 text-gray-700 rounded hover:bg-gray-400 font-medium">
+              ${t('common.cancel')}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `;
+}
+
+async function handleWalletAccountSubmit(event, accountId = null) {
+  event.preventDefault();
+
+  const formData = new FormData(event.target);
+  const nameValidation = validateString(formData.get('name'), 1, 50, t('form.account_name'));
+  if (!nameValidation.valid) {
+    showValidationError(nameValidation.error);
+    return;
+  }
+
+  const balanceValidation = validateNumber(formData.get('balance'), 0, 1000000000000, t('common.balance'));
+  if (!balanceValidation.valid) {
+    showValidationError(balanceValidation.error);
+    return;
+  }
+
+  const data = {
+    wallet_id: state.currentWalletId,
+    name: nameValidation.value,
+    type: formData.get('type'),
+    balance: balanceValidation.value,
+    bank_name: sanitizeString(formData.get('bank_name')),
+    savings_goal: Number(formData.get('savings_goal') || 0),
+    description: sanitizeString(formData.get('description'))
+  };
+
+  try {
+    const response = accountId
+      ? await axios.put(`/api/accounts/${accountId}`, data)
+      : await axios.post('/api/accounts', data);
+
+    if (response.data.success) {
+      closeModal();
+      await renderWalletView();
+    }
+  } catch (error) {
+    alert(error.response?.data?.error || '계좌 저장 중 오류가 발생했습니다.');
+  }
+}
+
+async function deleteWalletAccount(id) {
+  if (!confirm(t('wallet.delete_confirm'))) return;
+
+  try {
+    const response = await axios.delete(`/api/accounts/${id}`);
+    if (response.data.success) {
+      await renderWalletView();
+    }
+  } catch (error) {
+    alert(error.response?.data?.error || '계좌 삭제 중 오류가 발생했습니다.');
+  }
+}
+
+function openTransferModal(defaultFromId = null) {
+  if (!state.currentWalletId) {
+    alert(t('wallet.select_wallet_first'));
+    return;
+  }
+
+  if (state.accounts.length < 2) {
+    alert(t('wallet.not_enough_accounts'));
+    return;
+  }
+
+  const modalContainer = document.getElementById('modal-container');
+  const fallbackToAccount = state.accounts.find(account => account.id !== defaultFromId)?.id || state.accounts[0]?.id || '';
+
+  modalContainer.innerHTML = `
+    <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onclick="closeModal(event)">
+      <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4" onclick="event.stopPropagation()">
+        <h3 class="text-xl font-bold mb-4">${t('wallet.new_transfer')}</h3>
+        <form onsubmit="handleTransferSubmit(event)" class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('wallet.from_account')}</label>
+            <select name="from_account_id" class="w-full px-4 py-2 border rounded" required>
+              ${state.accounts.map(account => `
+                <option value="${account.id}" ${defaultFromId === account.id ? 'selected' : ''}>
+                  ${account.name} (${formatCurrencyByCode(account.balance, account.currency)})
+                </option>
+              `).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('wallet.to_account')}</label>
+            <select name="to_account_id" class="w-full px-4 py-2 border rounded" required>
+              ${state.accounts.map(account => `
+                <option value="${account.id}" ${(defaultFromId && fallbackToAccount === account.id) || (!defaultFromId && state.accounts[0]?.id !== account.id && fallbackToAccount === account.id) ? 'selected' : ''}>
+                  ${account.name} (${formatCurrencyByCode(account.balance, account.currency)})
+                </option>
+              `).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('common.amount')}</label>
+            <input type="number" name="amount" class="w-full px-4 py-2 border rounded" min="0.01" step="0.01" required>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('wallet.transfer_date')}</label>
+            <input type="date" name="transfer_date" value="${getDateString(new Date())}" class="w-full px-4 py-2 border rounded" required>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('common.description')}</label>
+            <input type="text" name="description" class="w-full px-4 py-2 border rounded" maxlength="100">
+          </div>
+          <div class="flex gap-2">
+            <button type="submit" class="flex-1 py-3 bg-cyan-600 text-white rounded hover:bg-cyan-700 font-medium">
+              ${t('wallet.new_transfer')}
+            </button>
+            <button type="button" onclick="closeModal()" class="flex-1 py-3 bg-gray-300 text-gray-700 rounded hover:bg-gray-400 font-medium">
+              ${t('common.cancel')}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `;
+}
+
+async function handleTransferSubmit(event) {
+  event.preventDefault();
+
+  const formData = new FormData(event.target);
+  const fromAccountId = parseInt(formData.get('from_account_id'), 10);
+  const toAccountId = parseInt(formData.get('to_account_id'), 10);
+
+  if (fromAccountId === toAccountId) {
+    showValidationError(t('wallet.same_account_error'));
+    return;
+  }
+
+  const amountValidation = validatePositiveNumber(formData.get('amount'), t('common.amount'));
+  if (!amountValidation.valid) {
+    showValidationError(amountValidation.error);
+    return;
+  }
+
+  const dateValidation = validateDate(formData.get('transfer_date'), t('wallet.transfer_date'));
+  if (!dateValidation.valid) {
+    showValidationError(dateValidation.error);
+    return;
+  }
+
+  const data = {
+    wallet_id: state.currentWalletId,
+    from_account_id: fromAccountId,
+    to_account_id: toAccountId,
+    amount: amountValidation.value,
+    description: sanitizeString(formData.get('description')),
+    transfer_date: dateValidation.value
+  };
+
+  try {
+    const response = await axios.post('/api/transfers', data);
+    if (response.data.success) {
+      closeModal();
+      await renderWalletView();
+    }
+  } catch (error) {
+    alert(error.response?.data?.error || '이체 중 오류가 발생했습니다.');
+  }
+}
+
 function openSavingsGoalModal(accountId, currentGoal) {
   const modalContainer = document.getElementById('modal-container');
   const account = state.savingsAccounts.find(a => a.id === accountId);
@@ -5291,8 +6804,64 @@ async function handleSavingsGoalSubmit(event, accountId) {
   }
 }
 
+function renderFixedExpenseRuleFields(frequency, prefix = '', expenseData = {}) {
+  const idPrefix = prefix ? `${prefix}-` : '';
+  const weekOptions = getFixedExpenseWeekOptions();
+
+  return `
+    <div id="${idPrefix}monthly-pattern-container" style="display: ${frequency === 'monthly' ? 'block' : 'none'}" class="space-y-4">
+      <div>
+        <label class="block text-sm font-medium mb-2">${t('fixed.week_of_month')}</label>
+        <select name="monthly_week_of_month" class="w-full px-4 py-2 border rounded">
+          ${weekOptions.map((label, index) => `
+            <option value="${index + 1}" ${Number(expenseData.week_of_month || 1) === index + 1 ? 'selected' : ''}>${label}</option>
+          `).join('')}
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm font-medium mb-2">${t('fixed.day_of_week')}</label>
+        <select name="monthly_day_of_week" class="w-full px-4 py-2 border rounded">
+          ${Array.from({ length: 7 }, (_, index) => `
+            <option value="${index}" ${Number(expenseData.day_of_week || 0) === index ? 'selected' : ''}>${getDayName(index)}</option>
+          `).join('')}
+        </select>
+      </div>
+    </div>
+
+    <div id="${idPrefix}weekly-container" style="display: ${frequency === 'weekly' ? 'block' : 'none'}">
+      <label class="block text-sm font-medium mb-2">${t('fixed.day_of_week')}</label>
+      <select name="weekly_day_of_week" class="w-full px-4 py-2 border rounded">
+        ${Array.from({ length: 7 }, (_, index) => `
+          <option value="${index}" ${Number(expenseData.day_of_week || 0) === index ? 'selected' : ''}>${getDayName(index)}</option>
+        `).join('')}
+      </select>
+    </div>
+
+    <div id="${idPrefix}monthly-day-container" style="display: ${frequency === 'monthly_day' ? 'block' : 'none'}">
+      <label class="block text-sm font-medium mb-2">${t('fixed.payment_day')}</label>
+      <input type="number" name="monthly_day_payment_day" value="${expenseData.payment_day || ''}" class="w-full px-4 py-2 border rounded" min="1" max="31" placeholder="1-31">
+    </div>
+
+    <div id="${idPrefix}yearly-container" style="display: ${frequency === 'yearly' ? 'block' : 'none'}" class="space-y-4">
+      <div>
+        <label class="block text-sm font-medium mb-2">${t('fixed.month_of_year')}</label>
+        <select name="yearly_month_of_year" class="w-full px-4 py-2 border rounded">
+          ${Array.from({ length: 12 }, (_, index) => `
+            <option value="${index + 1}" ${Number(expenseData.month_of_year || 1) === index + 1 ? 'selected' : ''}>${getMonthLabel(index + 1)}</option>
+          `).join('')}
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm font-medium mb-2">${t('fixed.payment_day')}</label>
+        <input type="number" name="yearly_payment_day" value="${expenseData.payment_day || ''}" class="w-full px-4 py-2 border rounded" min="1" max="31" placeholder="1-31">
+      </div>
+    </div>
+  `;
+}
+
 function openFixedExpenseModal() {
   const modalContainer = document.getElementById('modal-container');
+  const defaultFrequency = 'monthly_day';
   modalContainer.innerHTML = `
     <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onclick="closeModal(event)">
       <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4" onclick="event.stopPropagation()">
@@ -5315,26 +6884,12 @@ function openFixedExpenseModal() {
           <div>
             <label class="block text-sm font-medium mb-2">${t('fixed.frequency')}</label>
             <select name="frequency" class="w-full px-4 py-2 border rounded" required onchange="toggleFixedExpenseFields(this.value)">
-              <option value="monthly_day">${t('fixed.frequency.monthly')}</option>
-              <option value="weekly">${t('fixed.weekly')}</option>
+              ${getFixedExpenseFrequencyOptions().map(option => `
+                <option value="${option.value}" ${option.value === defaultFrequency ? 'selected' : ''}>${option.label}</option>
+              `).join('')}
             </select>
           </div>
-          <div id="day-of-week-container" style="display: none;">
-            <label class="block text-sm font-medium mb-2">${t('fixed.day_of_week')}</label>
-            <select name="day_of_week" class="w-full px-4 py-2 border rounded">
-              <option value="0">${t('fixed.sunday')}</option>
-              <option value="1">${t('fixed.monday')}</option>
-              <option value="2">${t('fixed.tuesday')}</option>
-              <option value="3">${t('fixed.wednesday')}</option>
-              <option value="4">${t('fixed.thursday')}</option>
-              <option value="5">${t('fixed.friday')}</option>
-              <option value="6">${t('fixed.saturday')}</option>
-            </select>
-          </div>
-          <div id="payment-day-container" style="displa"payment-day-container" style="display: none;">
-            <label class="block text-sm font-medium mb-2">${t('fixed.payment_day')}</label>
-            <input type="number" name="payment_day" class="w-full px-4 py-2 border rounded" min="1" max="31" placeholder="1-31">
-          </div>
+          ${renderFixedExpenseRuleFields(defaultFrequency)}
           <button type="submit" class="w-full py-3 bg-blue-500 text-white rounded hover:bg-blue-600 font-medium">
             ${t('common.add')}
           </button>
@@ -5344,22 +6899,17 @@ function openFixedExpenseModal() {
   `;
 }
 
-function toggleFixedExpenseFields(frequency) {
-  const weekOfMonthContainer = document.getElementById('week-of-month-container');
-  const dayOfWeekContainer = document.getElementById('day-of-week-container');
-  const paymentDayContainer = document.getElementById('payment-day-container');
-  
-  if (frequency === 'monthly_day') {
-    // 매월 (특정 일자)
-    weekOfMonthContainer.style.display = 'none';
-    dayOfWeekContainer.style.display = 'none';
-    paymentDayContainer.style.display = 'block';
-  } else if (frequency === 'weekly') {
-    // 매주 (특정 요일)
-    weekOfMonthContainer.style.display = 'none';
-    dayOfWeekContainer.style.display = 'block';
-    paymentDayContainer.style.display = 'none';
-  }
+function toggleFixedExpenseFields(frequency, prefix = '') {
+  const idPrefix = prefix ? `${prefix}-` : '';
+  const monthlyPatternContainer = document.getElementById(`${idPrefix}monthly-pattern-container`);
+  const weeklyContainer = document.getElementById(`${idPrefix}weekly-container`);
+  const monthlyDayContainer = document.getElementById(`${idPrefix}monthly-day-container`);
+  const yearlyContainer = document.getElementById(`${idPrefix}yearly-container`);
+
+  if (monthlyPatternContainer) monthlyPatternContainer.style.display = frequency === 'monthly' ? 'block' : 'none';
+  if (weeklyContainer) weeklyContainer.style.display = frequency === 'weekly' ? 'block' : 'none';
+  if (monthlyDayContainer) monthlyDayContainer.style.display = frequency === 'monthly_day' ? 'block' : 'none';
+  if (yearlyContainer) yearlyContainer.style.display = frequency === 'yearly' ? 'block' : 'none';
 }
 
 async function handleFixedExpenseSubmit(event) {
@@ -5398,8 +6948,21 @@ async function handleFixedExpenseSubmit(event) {
     frequency: frequency
   };
   
-  if (frequency === 'monthly_day') {
-    const paymentDay = formData.get('payment_day');
+  if (frequency === 'monthly') {
+    const weekValidation = validateInteger(formData.get('monthly_week_of_month'), 1, 5, t('fixed.week_of_month'));
+    if (!weekValidation.valid) {
+      showValidationError(weekValidation.error);
+      return;
+    }
+    const dayValidation = validateInteger(formData.get('monthly_day_of_week'), 0, 6, t('fixed.day_of_week'));
+    if (!dayValidation.valid) {
+      showValidationError(dayValidation.error);
+      return;
+    }
+    data.week_of_month = weekValidation.value;
+    data.day_of_week = dayValidation.value;
+  } else if (frequency === 'monthly_day') {
+    const paymentDay = formData.get('monthly_day_payment_day');
     const paymentDayValidation = validateInteger(paymentDay, 1, 31, '결제일');
     if (!paymentDayValidation.valid) {
       showValidationError(paymentDayValidation.error);
@@ -5407,13 +6970,26 @@ async function handleFixedExpenseSubmit(event) {
     }
     data.payment_day = paymentDayValidation.value;
   } else if (frequency === 'weekly') {
-    const dayOfWeek = formData.get('day_of_week');
+    const dayOfWeek = formData.get('weekly_day_of_week');
     const dayValidation = validateInteger(dayOfWeek, 0, 6, '요일');
     if (!dayValidation.valid) {
       showValidationError(dayValidation.error);
       return;
     }
     data.day_of_week = dayValidation.value;
+  } else if (frequency === 'yearly') {
+    const monthValidation = validateInteger(formData.get('yearly_month_of_year'), 1, 12, t('fixed.month_of_year'));
+    if (!monthValidation.valid) {
+      showValidationError(monthValidation.error);
+      return;
+    }
+    const paymentDayValidation = validateInteger(formData.get('yearly_payment_day'), 1, 31, '결제일');
+    if (!paymentDayValidation.valid) {
+      showValidationError(paymentDayValidation.error);
+      return;
+    }
+    data.month_of_year = monthValidation.value;
+    data.payment_day = paymentDayValidation.value;
   }
   
   try {
@@ -5539,6 +7115,9 @@ async function saveSettings() {
           case 'savings':
             await renderSavingsView();
             break;
+          case 'wallet':
+            await renderWalletView();
+            break;
           case 'fixed-expenses':
             await renderFixedExpensesView();
             break;
@@ -5563,8 +7142,8 @@ async function saveSettings() {
 async function confirmResetAllData() {
   const lang = getLanguage();
   const confirmMessage = lang === 'ko' 
-    ? '⚠️ 경고: 모든 데이터가 영구적으로 삭제됩니다!\n\n다음 데이터가 모두 삭제됩니다:\n- 모든 거래 내역\n- 모든 예산 설정\n- 모든 저축 계좌\n- 모든 투자 기록\n- 모든 고정 지출\n- 모든 영수증\n- 모든 부채 기록\n\n정말로 계속하시겠습니까?' 
-    : '⚠️ WARNING: All data will be permanently deleted!\n\nThe following data will be deleted:\n- All transactions\n- All budget settings\n- All savings accounts\n- All investments\n- All fixed expenses\n- All receipts\n- All debt records\n\nAre you sure you want to continue?';
+    ? '⚠️ 경고: 모든 데이터가 영구적으로 삭제됩니다!\n\n다음 데이터가 모두 삭제됩니다:\n- 모든 거래 내역\n- 모든 예산 설정\n- 모든 저축 계좌\n- 모든 공유지갑 계좌\n- 모든 이체 내역\n- 모든 투자 기록\n- 모든 고정 지출\n- 모든 영수증\n- 모든 부채 기록\n\n정말로 계속하시겠습니까?' 
+    : '⚠️ WARNING: All data will be permanently deleted!\n\nThe following data will be deleted:\n- All transactions\n- All budget settings\n- All savings accounts\n- All wallet accounts\n- All transfer history\n- All investments\n- All fixed expenses\n- All receipts\n- All debt records\n\nAre you sure you want to continue?';
   
   if (!confirm(confirmMessage)) {
     return;
@@ -5611,8 +7190,8 @@ async function confirmDeleteAccount() {
   
   // 첫 번째 확인
   const firstConfirm = lang === 'ko' 
-    ? '⚠️ 경고: 계정이 영구적으로 삭제됩니다!\n\n삭제되는 내용:\n- 계정 정보 (로그인 불가)\n- 모든 거래 내역\n- 모든 예산 설정\n- 모든 저축 계좌\n- 모든 투자 기록\n- 모든 고정 지출\n- 모든 영수증\n- 모든 부채 기록\n\n정말로 계속하시겠습니까?' 
-    : '⚠️ WARNING: Your account will be permanently deleted!\n\nWhat will be deleted:\n- Account information (cannot login)\n- All transactions\n- All budget settings\n- All savings accounts\n- All investments\n- All fixed expenses\n- All receipts\n- All debt records\n\nAre you sure you want to continue?';
+    ? '⚠️ 경고: 계정이 영구적으로 삭제됩니다!\n\n삭제되는 내용:\n- 계정 정보 (로그인 불가)\n- 모든 거래 내역\n- 모든 예산 설정\n- 모든 저축 계좌\n- 모든 공유지갑 계좌\n- 모든 이체 내역\n- 모든 투자 기록\n- 모든 고정 지출\n- 모든 영수증\n- 모든 부채 기록\n\n정말로 계속하시겠습니까?' 
+    : '⚠️ WARNING: Your account will be permanently deleted!\n\nWhat will be deleted:\n- Account information (cannot login)\n- All transactions\n- All budget settings\n- All savings accounts\n- All wallet accounts\n- All transfer history\n- All investments\n- All fixed expenses\n- All receipts\n- All debt records\n\nAre you sure you want to continue?';
   
   if (!confirm(firstConfirm)) {
     return;
@@ -6199,6 +7778,10 @@ async function performDataRestore(importData) {
           if (t.savings_account_id !== null && t.savings_account_id !== undefined) {
             transactionData.savings_account_id = t.savings_account_id;
           }
+
+          if (t.account_id !== null && t.account_id !== undefined) {
+            transactionData.account_id = t.account_id;
+          }
           
           await axios.post('/api/transactions', transactionData);
         } catch (error) {
@@ -6218,7 +7801,8 @@ async function performDataRestore(importData) {
             frequency: fe.frequency,
             week_of_month: fe.week_of_month,
             day_of_week: fe.day_of_week,
-            payment_day: fe.payment_day
+            payment_day: fe.payment_day,
+            month_of_year: fe.month_of_year
           });
         } catch (error) {
           console.error('고정지출 복원 오류:', error);
@@ -6279,70 +7863,40 @@ async function performDataRestore(importData) {
 function openEditFixedExpenseModal(expenseData) {
   const modalContainer = document.getElementById('modal-container');
   
-  const frequencyOptions = [
-    { value: 'monthly_day', label: '매월 (특정 일자)', selected: expenseData.frequency === 'monthly_day' },
-    { value: 'monthly', label: '매월 (특정 주/요일)', selected: expenseData.frequency === 'monthly' },
-    { value: 'weekly', label: '매주', selected: expenseData.frequency === 'weekly' }
-  ];
-  
   modalContainer.innerHTML = `
     <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onclick="closeModal(event)">
       <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4" onclick="event.stopPropagation()">
-        <h3 class="text-xl font-bold mb-4">고정지출 수정</h3>
+        <h3 class="text-xl font-bold mb-4">${t('fixed.edit')}</h3>
         <form onsubmit="handleEditFixedExpense(event, ${expenseData.id})" class="space-y-4">
           <div>
-            <label class="block text-sm font-medium mb-1">항목명</label>
+            <label class="block text-sm font-medium mb-1">${t('fixed.name')}</label>
             <input type="text" name="name" value="${expenseData.name}" required class="w-full px-4 py-2 border rounded">
           </div>
           <div>
-            <label class="block text-sm font-medium mb-1">카테고리</label>
+            <label class="block text-sm font-medium mb-1">${t('transaction.category')}</label>
             <select name="category" required class="w-full px-4 py-2 border rounded">
               ${categories.expense.map(cat => `<option value="${cat}" ${cat === expenseData.category ? 'selected' : ''}>${cat}</option>`).join('')}
             </select>
           </div>
           <div>
-            <label class="block text-sm font-medium mb-1">금액 (${CURRENCIES[state.settings.currency]?.symbol || '₩'})</label>
+            <label class="block text-sm font-medium mb-1">${t('fixed.amount')} (${CURRENCIES[state.settings.currency]?.symbol || '₩'})</label>
             <input type="number" name="amount" value="${expenseData.amount}" required min="0" step="1000" class="w-full px-4 py-2 border rounded">
           </div>
           <div>
-            <label class="block text-sm font-medium mb-1">주기</label>
+            <label class="block text-sm font-medium mb-1">${t('fixed.frequency')}</label>
             <select name="frequency" required class="w-full px-4 py-2 border rounded" onchange="toggleFixedExpenseFields(this.value, 'edit')">
-              ${frequencyOptions.map(opt => `<option value="${opt.value}" ${opt.selected ? 'selected' : ''}>${opt.label}</option>`).join('')}
+              ${getFixedExpenseFrequencyOptions().map(option => `
+                <option value="${option.value}" ${option.value === expenseData.frequency ? 'selected' : ''}>${option.label}</option>
+              `).join('')}
             </select>
           </div>
-          <div id="edit-monthly-day-field" style="display: ${expenseData.frequency === 'monthly_day' ? 'block' : 'none'}">
-            <label class="block text-sm font-medium mb-1">일자</label>
-            <input type="number" name="payment_day" value="${expenseData.payment_day || ''}" min="1" max="31" class="w-full px-4 py-2 border rounded">
-          </div>
-          <div id="edit-monthly-fields" style="display: ${expenseData.frequency === 'monthly' ? 'block' : 'none'}" class="space-y-2">
-            <div>
-              <label class="block text-sm font-medium mb-1">주차</label>
-              <select name="week_of_month" class="w-full px-4 py-2 border rounded">
-                <option value="1" ${expenseData.week_of_month === 1 ? 'selected' : ''}>첫째 주</option>
-                <option value="2" ${expenseData.week_of_month === 2 ? 'selected' : ''}>둘째 주</option>
-                <option value="3" ${expenseData.week_of_month === 3 ? 'selected' : ''}>셋째 주</option>
-                <option value="4" ${expenseData.week_of_month === 4 ? 'selected' : ''}>넷째 주</option>
-              </select>
-            </div>
-            <div>
-              <label class="block text-sm font-medium mb-1">요일</label>
-              <select name="day_of_week_monthly" class="w-full px-4 py-2 border rounded">
-                ${['일요일', '월요일', '화요일', '수요일', '목요일', '금요일', '토요일'].map((day, idx) => `<option value="${idx}" ${expenseData.day_of_week === idx ? 'selected' : ''}>${day}</option>`).join('')}
-              </select>
-            </div>
-          </div>
-          <div id="edit-weekly-field" style="display: ${expenseData.frequency === 'weekly' ? 'block' : 'none'}">
-            <label class="block text-sm font-medium mb-1">요일</label>
-            <select name="day_of_week_weekly" class="w-full px-4 py-2 border rounded">
-              ${['일요일', '월요일', '화요일', '수요일', '목요일', '금요일', '토요일'].map((day, idx) => `<option value="${idx}" ${expenseData.day_of_week === idx ? 'selected' : ''}>${day}</option>`).join('')}
-            </select>
-          </div>
+          ${renderFixedExpenseRuleFields(expenseData.frequency, 'edit', expenseData)}
           <div class="flex gap-2">
             <button type="submit" class="flex-1 py-3 bg-blue-500 text-white rounded hover:bg-blue-600 font-medium">
-              수정
+              ${t('common.save')}
             </button>
             <button type="button" onclick="closeModal()" class="flex-1 py-3 bg-gray-300 text-gray-700 rounded hover:bg-gray-400 font-medium">
-              취소
+              ${t('common.cancel')}
             </button>
           </div>
         </form>
@@ -6365,20 +7919,47 @@ async function handleEditFixedExpense(event, id) {
     frequency: frequency
   };
   
-  // 주기에 따라 필요한 필드 추가
-  if (frequency === 'monthly_day') {
-    const paymentDay = parseInt(formData.get('payment_day'));
+  if (frequency === 'monthly') {
+    const weekValidation = validateInteger(formData.get('monthly_week_of_month'), 1, 5, t('fixed.week_of_month'));
+    if (!weekValidation.valid) {
+      showValidationError(weekValidation.error);
+      return;
+    }
+    const dayValidation = validateInteger(formData.get('monthly_day_of_week'), 0, 6, t('fixed.day_of_week'));
+    if (!dayValidation.valid) {
+      showValidationError(dayValidation.error);
+      return;
+    }
+    data.week_of_month = weekValidation.value;
+    data.day_of_week = dayValidation.value;
+  } else if (frequency === 'monthly_day') {
+    const paymentDay = parseInt(formData.get('monthly_day_payment_day'));
     const paymentDayValidation = validateInteger(paymentDay, 1, 31, '결제일');
     if (!paymentDayValidation.valid) {
       showValidationError(paymentDayValidation.error);
       return;
     }
     data.payment_day = paymentDayValidation.value;
-  } else if (frequency === 'monthly') {
-    data.week_of_month = parseInt(formData.get('week_of_month'));
-    data.day_of_week = parseInt(formData.get('day_of_week_monthly'));
   } else if (frequency === 'weekly') {
-    data.day_of_week = parseInt(formData.get('day_of_week_weekly'));
+    const dayValidation = validateInteger(formData.get('weekly_day_of_week'), 0, 6, t('fixed.day_of_week'));
+    if (!dayValidation.valid) {
+      showValidationError(dayValidation.error);
+      return;
+    }
+    data.day_of_week = dayValidation.value;
+  } else if (frequency === 'yearly') {
+    const monthValidation = validateInteger(formData.get('yearly_month_of_year'), 1, 12, t('fixed.month_of_year'));
+    if (!monthValidation.valid) {
+      showValidationError(monthValidation.error);
+      return;
+    }
+    const paymentDayValidation = validateInteger(formData.get('yearly_payment_day'), 1, 31, '결제일');
+    if (!paymentDayValidation.valid) {
+      showValidationError(paymentDayValidation.error);
+      return;
+    }
+    data.month_of_year = monthValidation.value;
+    data.payment_day = paymentDayValidation.value;
   }
   
   // 금액 검증
@@ -8042,7 +9623,6 @@ function setupLogoutHandler() {
   if (logoutBtn) {
     logoutBtn.addEventListener('click', async () => {
       // 로컬 스토리지에서 토큰 삭제
-      localStorage.removeItem('authToken');
       localStorage.removeItem('auth_token');
       localStorage.removeItem('user_email');
       localStorage.removeItem('user_name');
@@ -8176,22 +9756,5 @@ setTimeout(() => {
   setupLogoutHandler();
 }, 100);
 
-function showBootstrapError(error) {
-  console.error('[Bootstrap] Fatal render error:', error);
-
-  const app = document.getElementById('app');
-  if (!app) return;
-
-  app.innerHTML = `
-    <div class="min-h-screen flex items-center justify-center bg-gray-100">
-      <div class="max-w-lg w-full bg-white border border-red-200 rounded-lg shadow-lg p-6 mx-4">
-        <h1 class="text-xl font-bold text-red-700 mb-3">Budget Lee loading error</h1>
-        <p class="text-gray-700 mb-4">앱을 불러오는 중 오류가 발생했습니다. 새로고침 후 다시 시도해주세요.</p>
-        <pre class="text-xs bg-gray-50 border rounded p-3 overflow-auto whitespace-pre-wrap">${String(error?.message || error)}</pre>
-      </div>
-    </div>
-  `;
-}
-
 // 앱 초기화 - 페이지 로드 시 인증 확인 후 적절한 화면 렌더링
-renderApp().catch(showBootstrapError);
+renderApp();
