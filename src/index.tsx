@@ -2682,6 +2682,51 @@ app.post('/api/wallets', authMiddleware, async (c) => {
   }
 })
 
+app.delete('/api/wallets/:id', authMiddleware, async (c) => {
+  const { DB } = c.env
+  const userId = Number(c.get('userId') || 0)
+  const walletId = normalizeOptionalInteger(c.req.param('id'))
+
+  if (!walletId) {
+    return c.json({ success: false, error: '공유지갑을 찾을 수 없습니다.' }, 404)
+  }
+
+  try {
+    const wallet = await DB.prepare(`
+      SELECT id, owner_user_id, is_active
+      FROM shared_wallets
+      WHERE id = ?
+    `).bind(walletId).first() as any
+
+    if (!wallet || Number(wallet.is_active) !== 1) {
+      return c.json({ success: false, error: '공유지갑을 찾을 수 없습니다.' }, 404)
+    }
+
+    if (Number(wallet.owner_user_id) !== userId) {
+      return c.json({ success: false, error: '공유지갑을 삭제할 권한이 없습니다.' }, 403)
+    }
+
+    await DB.prepare(`
+      UPDATE shared_wallets
+      SET is_active = 0,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(walletId).run()
+
+    const wallets = await getAccessibleWallets(DB, userId)
+
+    return c.json({
+      success: true,
+      deleted_wallet_id: walletId,
+      current_wallet_id: wallets[0]?.id || null,
+      wallets
+    })
+  } catch (error: any) {
+    console.error('[Wallets] Delete error:', error)
+    return c.json({ success: false, error: '공유지갑 삭제 실패' }, 500)
+  }
+})
+
 // 공유지갑 내 거래 조회
 app.get('/api/wallet-transactions', authMiddleware, async (c) => {
   const { DB } = c.env

@@ -563,65 +563,60 @@ function renderMonthlyWalletSnapshot(yearMonth) {
 
 function renderWalletAccountOverview(totalBalance, accountUsageSummary = {}) {
   return `
-    <section class="relative overflow-hidden rounded-[28px] border border-white/70 bg-gradient-to-br from-white/80 via-cyan-50/90 to-blue-100/80 p-6 shadow-lg backdrop-blur-xl">
-      <div class="absolute -top-12 right-0 h-32 w-32 rounded-full bg-cyan-200/40 blur-3xl"></div>
-      <div class="absolute -bottom-10 left-8 h-24 w-24 rounded-full bg-blue-200/30 blur-3xl"></div>
-
-      <div class="relative z-10 space-y-5">
-        <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <p class="text-sm font-semibold text-cyan-700">${t('wallet.account_overview')}</p>
-            <h3 class="mt-2 text-3xl font-bold text-slate-900">${formatCurrencyByCode(totalBalance)}</h3>
-            <p class="mt-2 text-sm text-slate-600">${t('wallet.account_overview_desc')}</p>
+    <section class="bg-white rounded-lg shadow p-6 space-y-5">
+      <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <p class="text-sm font-semibold text-cyan-700">${t('wallet.account_overview')}</p>
+          <h3 class="mt-2 text-3xl font-bold text-gray-900">${formatCurrencyByCode(totalBalance)}</h3>
+          <p class="mt-2 text-sm text-gray-500">${t('wallet.account_overview_desc')}</p>
+        </div>
+        <div class="inline-flex w-fit items-center gap-3 rounded-xl border border-gray-100 bg-gray-50/70 px-4 py-3">
+          <div class="flex h-11 w-11 items-center justify-center rounded-xl bg-cyan-100 text-cyan-700">
+            <i class="fas fa-wallet text-lg"></i>
           </div>
-          <div class="inline-flex w-fit items-center gap-3 rounded-2xl border border-white/80 bg-white/70 px-4 py-3 shadow-sm">
-            <div class="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-100 text-cyan-700">
-              <i class="fas fa-wallet text-lg"></i>
-            </div>
-            <div>
-              <p class="text-xs text-slate-500">${t('wallet.account_count')}</p>
-              <p class="text-xl font-bold text-slate-900">${state.accounts.length}</p>
-            </div>
+          <div>
+            <p class="text-xs text-gray-500">${t('wallet.account_count')}</p>
+            <p class="text-xl font-bold text-gray-900">${state.accounts.length}</p>
           </div>
         </div>
-
-        ${state.accounts.length === 0 ? `
-          <div class="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-6 text-center text-slate-500">
-            ${t('wallet.no_accounts')}
-          </div>
-        ` : `
-          <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
-            ${state.accounts.map(account => {
-              const meta = getWalletAccountTypeMeta(account.type);
-              const accentClasses = getWalletAccentClasses(meta.accent);
-              const accountUsage = accountUsageSummary[account.id] || { total: 0, count: 0 };
-
-              return `
-                <article class="rounded-2xl border border-white/80 bg-white/75 p-4 shadow-sm backdrop-blur-sm">
-                  <div class="flex items-start justify-between gap-3">
-                    <div class="min-w-0">
-                      <p class="truncate text-base font-semibold text-slate-900">${account.name}</p>
-                      <p class="mt-1 text-xs text-slate-500">${meta.label}</p>
-                    </div>
-                    <div class="flex h-10 w-10 items-center justify-center rounded-2xl ${accentClasses.panel}">
-                      <i class="fas ${meta.icon}"></i>
-                    </div>
-                  </div>
-                  <div class="mt-4">
-                    <p class="text-xs text-slate-500">${t('common.balance')}</p>
-                    <p class="mt-1 text-xl font-bold text-slate-900">${formatCurrencyByCode(account.balance, account.currency)}</p>
-                  </div>
-                  <div class="mt-3 pt-3 border-t border-slate-100">
-                    <p class="text-xs text-slate-500">${t('wallet.monthly_usage')}</p>
-                    <p class="mt-1 text-sm font-semibold text-rose-600">${formatCurrencyByCode(accountUsage.total, account.currency)}</p>
-                    <p class="mt-1 text-xs text-slate-400">${accountUsage.count}${getLanguage() === 'ko' ? '건 연결' : ' linked items'}</p>
-                  </div>
-                </article>
-              `;
-            }).join('')}
-          </div>
-        `}
       </div>
+
+      ${state.accounts.length === 0 ? `
+        <div class="rounded-xl border border-dashed border-gray-300 bg-gray-50/70 p-6 text-center text-gray-500">
+          ${t('wallet.no_accounts')}
+        </div>
+      ` : `
+        <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+          ${state.accounts.map(account => {
+            const meta = getWalletAccountTypeMeta(account.type);
+            const accentClasses = getWalletAccentClasses(meta.accent);
+            const accountUsage = accountUsageSummary[account.id] || { total: 0, count: 0 };
+
+            return `
+              <article class="rounded-xl border border-gray-100 bg-gray-50/70 p-4">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0">
+                    <p class="truncate text-base font-semibold text-gray-900">${account.name}</p>
+                    <p class="mt-1 text-xs text-gray-500">${meta.label}</p>
+                  </div>
+                  <div class="flex h-10 w-10 items-center justify-center rounded-xl ${accentClasses.panel}">
+                    <i class="fas ${meta.icon}"></i>
+                  </div>
+                </div>
+                <div class="mt-4">
+                  <p class="text-xs text-gray-500">${t('common.balance')}</p>
+                  <p class="mt-1 text-xl font-bold text-gray-900">${formatCurrencyByCode(account.balance, account.currency)}</p>
+                </div>
+                <div class="mt-3 border-t border-gray-200 pt-3">
+                  <p class="text-xs text-gray-500">${t('wallet.monthly_usage')}</p>
+                  <p class="mt-1 text-sm font-semibold text-rose-600">${formatCurrencyByCode(accountUsage.total, account.currency)}</p>
+                  <p class="mt-1 text-xs text-gray-400">${accountUsage.count}${getLanguage() === 'ko' ? '건 연결' : ' linked items'}</p>
+                </div>
+              </article>
+            `;
+          }).join('')}
+        </div>
+      `}
     </section>
   `;
 }
@@ -3185,6 +3180,7 @@ async function renderWalletView() {
   const daysInMonth = getDaysInMonth(state.currentMonth || new Date());
   const contentArea = document.getElementById('content-area');
   const currentWallet = getCurrentWallet();
+  const isWalletOwner = Number(currentWallet?.owner_user_id) === Number(state.currentUser?.id);
 
   if (!currentWallet) {
     contentArea.innerHTML = `
@@ -3287,6 +3283,11 @@ async function renderWalletView() {
           <button onclick="openWalletModal()" class="px-4 py-2 bg-white text-cyan-700 border border-cyan-200 rounded-lg hover:bg-cyan-50">
             <i class="fas fa-layer-group mr-2"></i>${t('wallet.create_wallet')}
           </button>
+          ${isWalletOwner ? `
+            <button onclick="deleteWallet(${currentWallet.id})" class="px-4 py-2 bg-white text-rose-600 border border-rose-200 rounded-lg hover:bg-rose-50">
+              <i class="fas fa-trash mr-2"></i>${t('wallet.delete_wallet')}
+            </button>
+          ` : ''}
           <button onclick="openTransferModal()" class="px-4 py-2 bg-cyan-600 text-white rounded-lg hover:bg-cyan-700">
             <i class="fas fa-exchange-alt mr-2"></i>${t('wallet.new_transfer')}
           </button>
@@ -3299,7 +3300,14 @@ async function renderWalletView() {
       <section class="bg-white rounded-2xl shadow p-5">
         <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
-            <p class="text-sm font-semibold text-cyan-700">${t('wallet.current_wallet')}</p>
+            <div class="flex flex-wrap items-center gap-2">
+              <p class="text-sm font-semibold text-cyan-700">${t('wallet.current_wallet')}</p>
+              ${isWalletOwner ? `
+                <span class="inline-flex items-center rounded-full bg-cyan-50 px-2.5 py-1 text-xs font-semibold text-cyan-700">
+                  ${t('wallet.owner_badge')}
+                </span>
+              ` : ''}
+            </div>
             <h3 class="text-2xl font-bold text-gray-900 mt-1">${currentWallet.name}</h3>
             <p class="text-sm text-gray-500 mt-1">${currentWallet.description || t('wallet.wallet_selector_desc')}</p>
           </div>
@@ -3601,6 +3609,35 @@ async function handleWalletCreate(event) {
     }
   } catch (error) {
     alert(error.response?.data?.error || '공유지갑 생성 중 오류가 발생했습니다.');
+  }
+}
+
+async function deleteWallet(walletId) {
+  const wallet = state.wallets.find(item => Number(item.id) === Number(walletId));
+  if (!wallet) {
+    alert(t('wallet.select_wallet_first'));
+    return;
+  }
+
+  if (Number(wallet.owner_user_id) !== Number(state.currentUser?.id)) {
+    alert(t('wallet.delete_wallet_forbidden'));
+    return;
+  }
+
+  if (!confirm(t('wallet.delete_wallet_confirm'))) {
+    return;
+  }
+
+  try {
+    const response = await axios.delete(`/api/wallets/${walletId}`);
+    if (response.data.success) {
+      setCurrentWalletId(response.data.current_wallet_id || null);
+      alert(t('wallet.delete_wallet_done'));
+      closeModal();
+      await renderWalletView();
+    }
+  } catch (error) {
+    alert(error.response?.data?.error || '공유지갑 삭제 중 오류가 발생했습니다.');
   }
 }
 
