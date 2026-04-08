@@ -362,6 +362,70 @@ function buildUserIdClause(columnName: string, userId: number | string | undefin
   }
 }
 
+function normalizeSavingsAccountName(value: unknown): string {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+function mergeSavingsAccountRows(rows: any[]): any[] {
+  const groups = new Map<string, any[]>()
+
+  for (const rawRow of rows || []) {
+    const row = {
+      ...rawRow,
+      id: Number(rawRow.id),
+      balance: Number(rawRow.balance || 0),
+      savings_goal: Number(rawRow.savings_goal || 0),
+      total_savings: Number(rawRow.total_savings || 0)
+    }
+    const key = normalizeSavingsAccountName(row.name) || `id:${row.id}`
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key)!.push(row)
+  }
+
+  return Array.from(groups.values())
+    .map((group) => {
+      const sorted = [...group].sort((a, b) => Number(b.id || 0) - Number(a.id || 0))
+      const primary = sorted[0]
+      return {
+        ...primary,
+        balance: Math.max(...sorted.map((row) => Number(row.balance || 0))),
+        savings_goal: Math.max(...sorted.map((row) => Number(row.savings_goal || 0))),
+        total_savings: sorted.reduce((sum, row) => sum + Number(row.total_savings || 0), 0),
+        linked_ids: sorted.map((row) => Number(row.id)),
+        duplicate_count: sorted.length
+      }
+    })
+    .sort((a, b) => {
+      const aTime = Date.parse(String(a.created_at || '')) || 0
+      const bTime = Date.parse(String(b.created_at || '')) || 0
+      if (aTime !== bTime) return aTime - bTime
+      return Number(a.id || 0) - Number(b.id || 0)
+    })
+}
+
+async function findSavingsAccountGroup(DB: D1Database, userId: number | string | undefined | null, accountId: string | number): Promise<any[] | null> {
+  const savingsScope = buildUserIdClause('user_id', userId)
+  const target = await DB.prepare(`
+    SELECT *
+    FROM savings_accounts
+    WHERE id = ? AND ${savingsScope.clause}
+    LIMIT 1
+  `).bind(accountId, ...savingsScope.bindings).first() as any
+
+  if (!target) return null
+
+  const normalizedName = normalizeSavingsAccountName(target.name)
+  const result = await DB.prepare(`
+    SELECT *
+    FROM savings_accounts
+    WHERE ${savingsScope.clause}
+      AND LOWER(TRIM(name)) = ?
+    ORDER BY id DESC
+  `).bind(...savingsScope.bindings, normalizedName).all()
+
+  return (result.results || []) as any[]
+}
+
 // CORS 활성화
 app.use('/api/*', cors())
 
@@ -1044,8 +1108,8 @@ app.get('/api/savings-accounts', authMiddleware, async (c) => {
     GROUP BY sa.id
     ORDER BY sa.created_at ASC
   `).bind(...transactionScope.bindings, ...savingsScope.bindings).all()
-  
-  return c.json({ success: true, data: result.results })
+
+  return c.json({ success: true, data: mergeSavingsAccountRows(result.results || []) })
 })
 
 // 1.2 저축 통장 생성
@@ -1056,6 +1120,21 @@ app.post('/api/savings-accounts', authMiddleware, async (c) => {
   
   if (!name) {
     return c.json({ success: false, error: '통장 이름을 입력해주세요.' }, 400)
+  }
+
+  const normalizedName = normalizeSavingsAccountName(name)
+  const savingsScope = buildUserIdClause('user_id', userId)
+  const existing = await DB.prepare(`
+    SELECT *
+    FROM savings_accounts
+    WHERE ${savingsScope.clause}
+      AND LOWER(TRIM(name)) = ?
+    ORDER BY id DESC
+  `).bind(...savingsScope.bindings, normalizedName).all()
+
+  if ((existing.results || []).length > 0) {
+    const merged = mergeSavingsAccountRows(existing.results || [])
+    return c.json({ success: true, id: merged[0]?.id, data: merged[0], reused: true })
   }
   
   const result = await DB.prepare(`
@@ -1075,12 +1154,21 @@ app.put('/api/savings-accounts/:id', authMiddleware, async (c) => {
   if (!name || name.trim() === '') {
     return c.json({ success: false, error: '통장 이름을 입력해주세요.' }, 400)
   }
-  
+
+  const group = await findSavingsAccountGroup(DB, userId, id)
+  if (!group || group.length === 0) {
+    return c.json({ success: false, error: '저축 통장을 찾을 수 없습니다.' }, 404)
+  }
+
+  const savingsScope = buildUserIdClause('user_id', userId)
+  const currentName = normalizeSavingsAccountName(group[0]?.name)
+
   await DB.prepare(`
     UPDATE savings_accounts 
     SET name = ?
-    WHERE id = ? AND user_id = ?
-  `).bind(name.trim(), id, userId?.toString()).run()
+    WHERE ${savingsScope.clause}
+      AND LOWER(TRIM(name)) = ?
+  `).bind(name.trim(), ...savingsScope.bindings, currentName).run()
   
   return c.json({ success: true })
 })
@@ -1090,8 +1178,20 @@ app.delete('/api/savings-accounts/:id', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
   const id = c.req.param('id')
-  
-  await DB.prepare(`DELETE FROM savings_accounts WHERE id = ? AND user_id = ?`).bind(id, userId?.toString()).run()
+
+  const group = await findSavingsAccountGroup(DB, userId, id)
+  if (!group || group.length === 0) {
+    return c.json({ success: false, error: '저축 통장을 찾을 수 없습니다.' }, 404)
+  }
+
+  const savingsScope = buildUserIdClause('user_id', userId)
+  const currentName = normalizeSavingsAccountName(group[0]?.name)
+
+  await DB.prepare(`
+    DELETE FROM savings_accounts
+    WHERE ${savingsScope.clause}
+      AND LOWER(TRIM(name)) = ?
+  `).bind(...savingsScope.bindings, currentName).run()
   
   return c.json({ success: true })
 })
@@ -1106,12 +1206,21 @@ app.put('/api/savings-accounts/:id/goal', authMiddleware, async (c) => {
   if (savings_goal === undefined || savings_goal < 0) {
     return c.json({ success: false, error: '유효한 목표 금액을 입력해주세요.' }, 400)
   }
-  
+
+  const group = await findSavingsAccountGroup(DB, userId, id)
+  if (!group || group.length === 0) {
+    return c.json({ success: false, error: '저축 통장을 찾을 수 없습니다.' }, 404)
+  }
+
+  const savingsScope = buildUserIdClause('user_id', userId)
+  const currentName = normalizeSavingsAccountName(group[0]?.name)
+
   await DB.prepare(`
     UPDATE savings_accounts 
     SET savings_goal = ?
-    WHERE id = ?
-  `).bind(savings_goal, id).run()
+    WHERE ${savingsScope.clause}
+      AND LOWER(TRIM(name)) = ?
+  `).bind(savings_goal, ...savingsScope.bindings, currentName).run()
   
   return c.json({ success: true })
 })

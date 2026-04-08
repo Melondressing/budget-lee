@@ -6901,7 +6901,7 @@ async function handleSavingsGoalSubmit(event, accountId) {
     
     if (response.data.success) {
       closeModal();
-      alert('저축 목표가 설정되었습니다.');
+      alert(goalValidation.value === 0 ? '저축 목표가 제거되었습니다.' : '저축 목표가 설정되었습니다.');
       renderSavingsView();
     }
   } catch (error) {
