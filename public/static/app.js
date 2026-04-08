@@ -495,6 +495,14 @@ function renderMonthlyWalletSnapshot(yearMonth) {
   const monthlyUsageTotal = state.transactions
     .filter(transaction => transaction.type === 'expense' || transaction.type === 'savings')
     .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+  const snapshotAccounts = [...state.accounts].sort((a, b) => {
+    const aGoal = Number(a.savings_goal || 0) > 0 ? 1 : 0;
+    const bGoal = Number(b.savings_goal || 0) > 0 ? 1 : 0;
+    if (bGoal !== aGoal) return bGoal - aGoal;
+    const balanceDiff = Number(b.balance || 0) - Number(a.balance || 0);
+    if (balanceDiff !== 0) return balanceDiff;
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
 
   return `
     <div class="bg-white p-6 rounded-lg shadow space-y-5">
@@ -536,7 +544,7 @@ function renderMonthlyWalletSnapshot(yearMonth) {
             <p class="text-sm text-gray-500">${t('wallet.no_accounts')}</p>
           ` : `
             <div class="space-y-3">
-              ${state.accounts.slice(0, 4).map(account => {
+              ${snapshotAccounts.slice(0, 4).map(account => {
                 const meta = getWalletAccountTypeMeta(account.type);
                 return `
                   <div class="border border-gray-200 rounded-lg p-3 flex items-center justify-between gap-3">
@@ -561,7 +569,7 @@ function renderMonthlyWalletSnapshot(yearMonth) {
   `;
 }
 
-function renderWalletAccountOverview(totalBalance, accountUsageSummary = {}) {
+function renderWalletAccountOverview(totalBalance, accountUsageSummary = {}, accounts = state.accounts) {
   return `
     <section class="bg-white rounded-lg shadow p-6 space-y-5">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
@@ -576,18 +584,18 @@ function renderWalletAccountOverview(totalBalance, accountUsageSummary = {}) {
           </div>
           <div>
             <p class="text-xs text-gray-500">${t('wallet.account_count')}</p>
-            <p class="text-xl font-bold text-gray-900">${state.accounts.length}</p>
+            <p class="text-xl font-bold text-gray-900">${accounts.length}</p>
           </div>
         </div>
       </div>
 
-      ${state.accounts.length === 0 ? `
+      ${accounts.length === 0 ? `
         <div class="rounded-xl border border-dashed border-gray-300 bg-gray-50/70 p-6 text-center text-gray-500">
           ${t('wallet.no_accounts')}
         </div>
       ` : `
         <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
-          ${state.accounts.map(account => {
+          ${accounts.map(account => {
             const meta = getWalletAccountTypeMeta(account.type);
             const accentClasses = getWalletAccentClasses(meta.accent);
             const accountUsage = accountUsageSummary[account.id] || { total: 0, count: 0 };
@@ -1964,6 +1972,40 @@ async function renderHomeView() {
         </div>
       </div>
       
+      <!-- 빠른 액션 버튼 -->
+      <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
+        <button onclick="switchView('month')" 
+                class="bg-blue-500 hover:bg-blue-600 text-white p-4 rounded-lg shadow-lg transition-all">
+          <i class="fas fa-calendar-alt text-2xl mb-2"></i>
+          <p class="font-medium">${t('home.monthly_view')}</p>
+        </button>
+        <button onclick="switchView('budgets')" 
+                class="bg-green-500 hover:bg-green-600 text-white p-4 rounded-lg shadow-lg transition-all">
+          <i class="fas fa-chart-pie text-2xl mb-2"></i>
+          <p class="font-medium">${t('budget.title')}</p>
+        </button>
+        <button onclick="switchView('savings')" 
+                class="bg-purple-500 hover:bg-purple-600 text-white p-4 rounded-lg shadow-lg transition-all">
+          <i class="fas fa-piggy-bank text-2xl mb-2"></i>
+          <p class="font-medium">${t('savings.title')}</p>
+        </button>
+        <button onclick="switchView('wallet')" 
+                class="bg-cyan-600 hover:bg-cyan-700 text-white p-4 rounded-lg shadow-lg transition-all">
+          <i class="fas fa-wallet text-2xl mb-2"></i>
+          <p class="font-medium">${t('tab.wallet')}</p>
+        </button>
+        <button onclick="switchView('fixed-expenses')" 
+                class="bg-rose-500 hover:bg-rose-600 text-white p-4 rounded-lg shadow-lg transition-all">
+          <i class="fas fa-redo text-2xl mb-2"></i>
+          <p class="font-medium">${t('tab.fixed_expenses')}</p>
+        </button>
+        <button onclick="switchView('reports')" 
+                class="bg-orange-500 hover:bg-orange-600 text-white p-4 rounded-lg shadow-lg transition-all">
+          <i class="fas fa-chart-bar text-2xl mb-2"></i>
+          <p class="font-medium">${t('report.title')}</p>
+        </button>
+      </div>
+
       <!-- 저축률 달성 바 -->
       <div class="bg-white p-6 rounded-lg shadow-lg">
         <div class="flex justify-between items-center mb-3">
@@ -2003,40 +2045,6 @@ async function renderHomeView() {
         <div class="h-64">
           <canvas id="home-comparison-chart"></canvas>
         </div>
-      </div>
-      
-      <!-- 빠른 액션 버튼 -->
-      <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
-        <button onclick="switchView('month')" 
-                class="bg-blue-500 hover:bg-blue-600 text-white p-4 rounded-lg shadow-lg transition-all">
-          <i class="fas fa-calendar-alt text-2xl mb-2"></i>
-          <p class="font-medium">${t('home.monthly_view')}</p>
-        </button>
-        <button onclick="switchView('budgets')" 
-                class="bg-green-500 hover:bg-green-600 text-white p-4 rounded-lg shadow-lg transition-all">
-          <i class="fas fa-chart-pie text-2xl mb-2"></i>
-          <p class="font-medium">${t('budget.title')}</p>
-        </button>
-        <button onclick="switchView('savings')" 
-                class="bg-purple-500 hover:bg-purple-600 text-white p-4 rounded-lg shadow-lg transition-all">
-          <i class="fas fa-piggy-bank text-2xl mb-2"></i>
-          <p class="font-medium">${t('savings.title')}</p>
-        </button>
-        <button onclick="switchView('wallet')" 
-                class="bg-cyan-600 hover:bg-cyan-700 text-white p-4 rounded-lg shadow-lg transition-all">
-          <i class="fas fa-wallet text-2xl mb-2"></i>
-          <p class="font-medium">${t('tab.wallet')}</p>
-        </button>
-        <button onclick="switchView('fixed-expenses')" 
-                class="bg-rose-500 hover:bg-rose-600 text-white p-4 rounded-lg shadow-lg transition-all">
-          <i class="fas fa-redo text-2xl mb-2"></i>
-          <p class="font-medium">${t('tab.fixed_expenses')}</p>
-        </button>
-        <button onclick="switchView('reports')" 
-                class="bg-orange-500 hover:bg-orange-600 text-white p-4 rounded-lg shadow-lg transition-all">
-          <i class="fas fa-chart-bar text-2xl mb-2"></i>
-          <p class="font-medium">${t('report.title')}</p>
-        </button>
       </div>
     </div>
   `;
@@ -2282,18 +2290,13 @@ async function renderMonthView() {
         </div>
       </div>
       
-      <!-- 수입/지출/저축 비율 파이차트 -->
-      <div class="bg-white p-6 rounded-lg shadow">
-        <h3 class="text-xl font-bold mb-4">${t('month.monthly_ratio')}</h3>
-        <div class="flex justify-center">
-          <canvas id="month-pie-chart" style="max-width: 300px; max-height: 300px;"></canvas>
-        </div>
-      </div>
-      
+      ${renderMonthlyWalletSnapshot(yearMonth)}
+
       <!-- 예산 vs 지출 그래프 -->
       ${renderBudgetChart(budgetData, '월별')}
 
-      ${renderMonthlyWalletSnapshot(yearMonth)}
+      <!-- 카테고리별 지출 바 그래프 -->
+      ${renderExpenseBarChart(expenseByCategory, '월별')}
       
       <!-- 저축 목표 진행 상황 -->
       <div class="bg-white p-6 rounded-lg shadow">
@@ -2308,15 +2311,20 @@ async function renderMonthView() {
         </div>
       </div>
       
+      <!-- 수입/지출/저축 비율 파이차트 -->
+      <div class="bg-white p-6 rounded-lg shadow">
+        <h3 class="text-xl font-bold mb-4">${t('month.monthly_ratio')}</h3>
+        <div class="flex justify-center">
+          <canvas id="month-pie-chart" style="max-width: 300px; max-height: 300px;"></canvas>
+        </div>
+      </div>
+      
       <!-- 달력 -->
       <div class="bg-white p-6 rounded-lg shadow">
         <h3 class="text-xl font-bold mb-4">${t('month.monthly_calendar')}</h3>
         ${renderCalendar(calendarData, fixedExpenseMap)}
       </div>
-      
-      <!-- 카테고리별 지출 바 그래프 -->
-      ${renderExpenseBarChart(expenseByCategory, '월별')}
-      
+
       <!-- 거래 내역 -->
       <div class="bg-white p-6 rounded-lg shadow">
         <div class="flex justify-between items-center mb-4">
@@ -2437,10 +2445,28 @@ async function renderSavingsGoalsProgress() {
       return;
     }
     
+    const sortedSavingsAccounts = [...state.savingsAccounts].sort((a, b) => {
+      const aGoal = Number(a.savings_goal || 0) > 0 ? 1 : 0;
+      const bGoal = Number(b.savings_goal || 0) > 0 ? 1 : 0;
+      if (bGoal !== aGoal) return bGoal - aGoal;
+
+      if (aGoal && bGoal) {
+        const aCurrent = Number(a.balance ?? a.total_savings ?? 0);
+        const bCurrent = Number(b.balance ?? b.total_savings ?? 0);
+        const aProgress = Number(a.savings_goal || 0) > 0 ? aCurrent / Number(a.savings_goal || 1) : 0;
+        const bProgress = Number(b.savings_goal || 0) > 0 ? bCurrent / Number(b.savings_goal || 1) : 0;
+        if (aProgress !== bProgress) return aProgress - bProgress;
+      }
+
+      const balanceDiff = Number(b.balance ?? b.total_savings ?? 0) - Number(a.balance ?? a.total_savings ?? 0);
+      if (balanceDiff !== 0) return balanceDiff;
+      return String(a.name || '').localeCompare(String(b.name || ''));
+    });
+
     // 모든 계좌 표시 (목표 유무 관계없이)
     let html = '<div class="space-y-4">';
     
-    state.savingsAccounts.forEach(account => {
+    sortedSavingsAccounts.forEach(account => {
       const hasGoal = account.savings_goal && account.savings_goal > 0;
       
       if (!hasGoal) {
@@ -3031,16 +3057,11 @@ async function renderWeekView() {
         </div>
       </div>
       
-      <!-- 수입/지출/저축 비율 파이차트 -->
-      <div class="bg-white p-6 rounded-lg shadow">
-        <h3 class="text-xl font-bold mb-4">${t('week.weekly_ratio')}</h3>
-        <div class="flex justify-center">
-          <canvas id="week-pie-chart" style="max-width: 300px; max-height: 300px;"></canvas>
-        </div>
-      </div>
-      
       <!-- 주간 예산 vs 지출 그래프 -->
       ${renderBudgetChart(budgetData, '주별')}
+
+      <!-- 주간 카테고리별 지출 바 그래프 -->
+      ${renderExpenseBarChart(expenseByCategory, '주별')}
       
       <!-- 저축 목표 진행 상황 -->
       <div class="bg-white p-6 rounded-lg shadow">
@@ -3055,8 +3076,13 @@ async function renderWeekView() {
         </div>
       </div>
       
-      <!-- 주간 카테고리별 지출 바 그래프 -->
-      ${renderExpenseBarChart(expenseByCategory, '주별')}
+      <!-- 수입/지출/저축 비율 파이차트 -->
+      <div class="bg-white p-6 rounded-lg shadow">
+        <h3 class="text-xl font-bold mb-4">${t('week.weekly_ratio')}</h3>
+        <div class="flex justify-center">
+          <canvas id="week-pie-chart" style="max-width: 300px; max-height: 300px;"></canvas>
+        </div>
+      </div>
       
       <div class="bg-white p-6 rounded-lg shadow">
         <div class="flex justify-between items-center mb-4">
@@ -3081,7 +3107,25 @@ async function renderWeekView() {
 async function renderSavingsView() {
   await fetchSavingsAccounts();
   
-  const totalSavings = state.savingsAccounts.reduce((sum, acc) => sum + (acc.total_savings || 0), 0);
+  const orderedSavingsAccounts = [...state.savingsAccounts].sort((a, b) => {
+    const aGoal = Number(a.savings_goal || 0) > 0 ? 1 : 0;
+    const bGoal = Number(b.savings_goal || 0) > 0 ? 1 : 0;
+    if (bGoal !== aGoal) return bGoal - aGoal;
+
+    const aCurrent = Number(a.total_savings ?? a.balance ?? 0);
+    const bCurrent = Number(b.total_savings ?? b.balance ?? 0);
+
+    if (aGoal && bGoal) {
+      const aProgress = Number(a.savings_goal || 0) > 0 ? aCurrent / Number(a.savings_goal || 1) : 0;
+      const bProgress = Number(b.savings_goal || 0) > 0 ? bCurrent / Number(b.savings_goal || 1) : 0;
+      if (aProgress !== bProgress) return aProgress - bProgress;
+    }
+
+    if (bCurrent !== aCurrent) return bCurrent - aCurrent;
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+
+  const totalSavings = orderedSavingsAccounts.reduce((sum, acc) => sum + (acc.total_savings || 0), 0);
   
   const contentArea = document.getElementById('content-area');
   contentArea.innerHTML = `
@@ -3098,7 +3142,7 @@ async function renderSavingsView() {
         </button>
       </div>
       
-      ${state.savingsAccounts.length === 0 ? `
+      ${orderedSavingsAccounts.length === 0 ? `
         <div class="bg-white p-8 rounded-lg shadow text-center">
           <i class="fas fa-piggy-bank text-6xl text-gray-300 mb-4"></i>
           <h3 class="text-xl font-semibold text-gray-700 mb-2">${t('savings.no_accounts')}</h3>
@@ -3110,7 +3154,7 @@ async function renderSavingsView() {
         </div>
       ` : `
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          ${state.savingsAccounts.map(acc => {
+          ${orderedSavingsAccounts.map(acc => {
           const savingsGoal = acc.savings_goal || 0;
           const currentSavings = acc.total_savings || 0;
           const progress = savingsGoal > 0 ? Math.min((currentSavings / savingsGoal) * 100, 100) : 0;
@@ -3270,6 +3314,19 @@ async function renderWalletView() {
         return accumulator;
       }, {})
   ).sort((a, b) => b.total - a.total);
+  const sortedAccounts = [...state.accounts].sort((a, b) => {
+    const aUsage = Number(accountUsageSummary[a.id]?.total || 0);
+    const bUsage = Number(accountUsageSummary[b.id]?.total || 0);
+    if (bUsage !== aUsage) return bUsage - aUsage;
+
+    const aGoal = Number(a.savings_goal || 0) > 0 ? 1 : 0;
+    const bGoal = Number(b.savings_goal || 0) > 0 ? 1 : 0;
+    if (bGoal !== aGoal) return bGoal - aGoal;
+
+    const balanceDiff = Number(b.balance || 0) - Number(a.balance || 0);
+    if (balanceDiff !== 0) return balanceDiff;
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
 
   contentArea.innerHTML = `
     <div class="space-y-6">
@@ -3324,41 +3381,41 @@ async function renderWalletView() {
         </div>
       </section>
 
-      ${renderWalletBulkAssignment(unassignedExpenseTransactions)}
-
-      ${renderWalletAccountOverview(totalBalance, accountUsageSummary)}
-
       <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
         <div class="bg-white rounded-lg shadow p-5">
           <p class="text-sm text-gray-500">${t('home.total_assets')}</p>
           <p class="text-3xl font-bold text-gray-900 mt-2">${formatCurrencyByCode(totalBalance)}</p>
         </div>
         <div class="bg-white rounded-lg shadow p-5">
-          <p class="text-sm text-gray-500">${t('wallet.account_count')}</p>
-          <p class="text-3xl font-bold text-cyan-700 mt-2">${state.accounts.length}</p>
+          <p class="text-sm text-gray-500">${t('wallet.goal_count')}</p>
+          <p class="text-3xl font-bold text-green-700 mt-2">${savingsGoalCount}${getLanguage() === 'ko' ? '개' : ''}</p>
         </div>
         <div class="bg-white rounded-lg shadow p-5">
-          <p class="text-sm text-gray-500">${t('wallet.member_count')}</p>
-          <p class="text-3xl font-bold text-slate-700 mt-2">${currentWallet.member_count || 1}</p>
+          <p class="text-sm text-gray-500">${t('wallet.account_count')}</p>
+          <p class="text-3xl font-bold text-cyan-700 mt-2">${state.accounts.length}</p>
         </div>
         <div class="bg-white rounded-lg shadow p-5">
           <p class="text-sm text-gray-500">${t('wallet.monthly_transfer_volume')}</p>
           <p class="text-3xl font-bold text-violet-700 mt-2">${formatCurrencyByCode(transferVolume)}</p>
         </div>
         <div class="bg-white rounded-lg shadow p-5">
-          <p class="text-sm text-gray-500">${t('wallet.goal_count')}</p>
-          <p class="text-3xl font-bold text-green-700 mt-2">${savingsGoalCount}${getLanguage() === 'ko' ? '개' : ''}</p>
+          <p class="text-sm text-gray-500">${t('wallet.member_count')}</p>
+          <p class="text-3xl font-bold text-slate-700 mt-2">${currentWallet.member_count || 1}</p>
         </div>
       </div>
 
-      <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <section class="xl:col-span-2 bg-white rounded-lg shadow p-6">
+      ${renderWalletBulkAssignment(unassignedExpenseTransactions)}
+
+      ${renderWalletAccountOverview(totalBalance, accountUsageSummary, sortedAccounts)}
+
+      <div class="grid grid-cols-1 xl:grid-cols-5 gap-6">
+        <section class="xl:col-span-3 bg-white rounded-lg shadow p-6">
           <div class="flex items-center justify-between mb-4">
             <h3 class="text-xl font-bold text-gray-800">${t('wallet.accounts')}</h3>
-            <span class="text-sm text-gray-500">${state.accounts.length}${getLanguage() === 'ko' ? '개' : ''}</span>
+            <span class="text-sm text-gray-500">${sortedAccounts.length}${getLanguage() === 'ko' ? '개' : ''}</span>
           </div>
 
-          ${state.accounts.length === 0 ? `
+          ${sortedAccounts.length === 0 ? `
             <div class="border border-dashed border-gray-300 rounded-xl p-8 text-center">
               <i class="fas fa-wallet text-4xl text-gray-300 mb-3"></i>
               <p class="text-gray-500 mb-4">${t('wallet.no_accounts')}</p>
@@ -3366,9 +3423,9 @@ async function renderWalletView() {
                 ${t('wallet.add_first_account')}
               </button>
             </div>
-          ` : `
+            ` : `
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-              ${state.accounts.map(account => {
+              ${sortedAccounts.map(account => {
                 const meta = getWalletAccountTypeMeta(account.type);
                 const accentClasses = getWalletAccentClasses(meta.accent);
 
@@ -3422,70 +3479,40 @@ async function renderWalletView() {
           `}
         </section>
 
-        <div class="space-y-6">
-          <section class="bg-white rounded-lg shadow p-6">
-            <h3 class="text-xl font-bold text-gray-800 mb-4">${t('wallet.usage_by_method')}</h3>
-            <div class="space-y-3">
-              ${usageByMethod.map(item => {
-                const meta = getPaymentMethodMeta(item.method);
-                return `
-                  <div class="flex items-center justify-between rounded-xl border border-gray-100 p-4">
-                    <div class="flex items-center gap-3">
-                      <div class="w-10 h-10 rounded-full flex items-center justify-center ${meta.classes}">
-                        <i class="fas ${meta.icon}"></i>
-                      </div>
-                      <span class="font-medium text-gray-900">${meta.label}</span>
+        <section class="xl:col-span-2 bg-white rounded-lg shadow p-6">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-xl font-bold text-gray-800">${t('wallet.savings_goals')}</h3>
+            <span class="text-sm text-green-600 font-medium">${savingsGoalCount}${getLanguage() === 'ko' ? '개 목표' : ' goals'}</span>
+          </div>
+          ${renderSavingsGoalCards(null, sortedAccounts)}
+        </section>
+      </div>
+
+      <div class="grid grid-cols-1 xl:grid-cols-5 gap-6">
+        <section class="xl:col-span-3 bg-white rounded-lg shadow p-6">
+          <h3 class="text-xl font-bold text-gray-800 mb-4">${t('wallet.category_usage')}</h3>
+          ${renderWalletCategoryUsage(expenseCategoryUsage)}
+        </section>
+
+        <section class="xl:col-span-2 bg-white rounded-lg shadow p-6">
+          <h3 class="text-xl font-bold text-gray-800 mb-4">${t('wallet.usage_by_method')}</h3>
+          <div class="space-y-3">
+            ${usageByMethod.map(item => {
+              const meta = getPaymentMethodMeta(item.method);
+              return `
+                <div class="flex items-center justify-between rounded-xl border border-gray-100 p-4">
+                  <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 rounded-full flex items-center justify-center ${meta.classes}">
+                      <i class="fas ${meta.icon}"></i>
                     </div>
-                    <span class="text-lg font-bold text-gray-900">${formatCurrencyByCode(item.total)}</span>
+                    <span class="font-medium text-gray-900">${meta.label}</span>
                   </div>
-                `;
-              }).join('')}
-            </div>
-          </section>
-
-          <section class="bg-white rounded-lg shadow p-6">
-            <h3 class="text-xl font-bold text-gray-800 mb-4">${t('wallet.category_usage')}</h3>
-            ${renderWalletCategoryUsage(expenseCategoryUsage)}
-          </section>
-
-          <section class="bg-white rounded-lg shadow p-6">
-            <div class="flex items-center justify-between mb-4">
-              <h3 class="text-xl font-bold text-gray-800">${t('wallet.recent_transfers')}</h3>
-              <button onclick="openTransferModal()" class="text-sm text-cyan-600 hover:text-cyan-700 font-medium">
-                ${t('wallet.new_transfer')}
-              </button>
-            </div>
-
-            ${recentTransfers.length === 0 ? `
-              <div class="border border-dashed border-gray-300 rounded-xl p-8 text-center">
-                <i class="fas fa-exchange-alt text-4xl text-gray-300 mb-3"></i>
-                <p class="text-gray-500">${t('wallet.no_transfers')}</p>
-              </div>
-            ` : `
-              <div class="space-y-3">
-                ${recentTransfers.map(transfer => `
-                  <div class="border border-gray-100 rounded-xl p-4">
-                    <div class="flex items-center justify-between gap-3">
-                      <div>
-                        <p class="font-semibold text-gray-900">${transfer.from_account_name || '-'}</p>
-                        <p class="text-xs text-gray-500 mt-1">
-                          <i class="fas fa-arrow-right mr-1"></i>${transfer.to_account_name || '-'}
-                        </p>
-                      </div>
-                      <div class="text-right">
-                        <p class="font-bold text-cyan-700">${formatCurrencyByCode(transfer.amount)}</p>
-                        <p class="text-xs text-gray-500 mt-1">${transfer.transfer_date}</p>
-                      </div>
-                    </div>
-                    ${transfer.description ? `
-                      <p class="text-sm text-gray-500 mt-3">${transfer.description}</p>
-                    ` : ''}
-                  </div>
-                `).join('')}
-              </div>
-            `}
-          </section>
-        </div>
+                  <span class="text-lg font-bold text-gray-900">${formatCurrencyByCode(item.total)}</span>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </section>
       </div>
 
       <div class="grid grid-cols-1 xl:grid-cols-5 gap-6">
@@ -3541,10 +3568,40 @@ async function renderWalletView() {
 
         <section class="xl:col-span-2 bg-white rounded-lg shadow p-6">
           <div class="flex items-center justify-between mb-4">
-            <h3 class="text-xl font-bold text-gray-800">${t('wallet.savings_goals')}</h3>
-            <span class="text-sm text-green-600 font-medium">${savingsGoalCount}${getLanguage() === 'ko' ? '개 목표' : ' goals'}</span>
+            <h3 class="text-xl font-bold text-gray-800">${t('wallet.recent_transfers')}</h3>
+            <button onclick="openTransferModal()" class="text-sm text-cyan-600 hover:text-cyan-700 font-medium">
+              ${t('wallet.new_transfer')}
+            </button>
           </div>
-          ${renderSavingsGoalCards(null, state.accounts)}
+
+          ${recentTransfers.length === 0 ? `
+            <div class="border border-dashed border-gray-300 rounded-xl p-8 text-center">
+              <i class="fas fa-exchange-alt text-4xl text-gray-300 mb-3"></i>
+              <p class="text-gray-500">${t('wallet.no_transfers')}</p>
+            </div>
+          ` : `
+            <div class="space-y-3">
+              ${recentTransfers.map(transfer => `
+                <div class="border border-gray-100 rounded-xl p-4">
+                  <div class="flex items-center justify-between gap-3">
+                    <div>
+                      <p class="font-semibold text-gray-900">${transfer.from_account_name || '-'}</p>
+                      <p class="text-xs text-gray-500 mt-1">
+                        <i class="fas fa-arrow-right mr-1"></i>${transfer.to_account_name || '-'}
+                      </p>
+                    </div>
+                    <div class="text-right">
+                      <p class="font-bold text-cyan-700">${formatCurrencyByCode(transfer.amount)}</p>
+                      <p class="text-xs text-gray-500 mt-1">${transfer.transfer_date}</p>
+                    </div>
+                  </div>
+                  ${transfer.description ? `
+                    <p class="text-sm text-gray-500 mt-3">${transfer.description}</p>
+                  ` : ''}
+                </div>
+              `).join('')}
+            </div>
+          `}
         </section>
       </div>
     </div>
