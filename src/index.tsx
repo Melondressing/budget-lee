@@ -605,6 +605,10 @@ app.get('/api/auth/google/callback', async (c) => {
     const secret = c.env.JWT_SECRET || 'default-secret-key'
     const token = await createToken(user.id, user.username, secret)
     
+    const safeToken = JSON.stringify(token)
+    const safeEmail = JSON.stringify(user.email || '')
+    const safeName = JSON.stringify(user.name || user.username || 'Google User')
+
     // 5. Redirect to app with token
     return c.html(`
       <html>
@@ -612,9 +616,12 @@ app.get('/api/auth/google/callback', async (c) => {
           <title>Login Successful</title>
           <script>
             // Store token in localStorage
-            localStorage.setItem('auth_token', '${token}');
-            localStorage.setItem('user_email', '${user.email}');
-            localStorage.setItem('user_name', '${user.name}');
+            localStorage.setItem('auth_token', ${safeToken});
+            localStorage.setItem('authToken', ${safeToken});
+            localStorage.setItem('user_email', ${safeEmail});
+            localStorage.setItem('user_name', ${safeName});
+            // OAuth 로그인 이후 세션 토큰이 섞이지 않도록 제거
+            localStorage.removeItem('sessionId');
             
             // Redirect to home
             window.location.href = '/';
