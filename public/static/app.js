@@ -563,7 +563,7 @@ function renderMonthlyWalletSnapshot(yearMonth) {
 
 function renderWalletAccountOverview(totalBalance, accountUsageSummary = {}) {
   return `
-    <section class="relative overflow-hidden rounded-[28px] border border-white/70 bg-gradient-to-br from-white/80 via-cyan-50/90 to-blue-100/80 p-6 shadow-lg backdrop-blur-xl">
+    <section class="relative overflow-hidden rounded-[28px] border border-white/70 wallet-overview-gradient p-6 shadow-lg backdrop-blur-xl">
       <div class="absolute -top-12 right-0 h-32 w-32 rounded-full bg-cyan-200/40 blur-3xl"></div>
       <div class="absolute -bottom-10 left-8 h-24 w-24 rounded-full bg-blue-200/30 blur-3xl"></div>
 

@@ -761,6 +761,16 @@ button[onclick*="Modal"],
   box-shadow: var(--shadow-md);
 }
 
+/* 공유지갑 계좌 요약 전용 그라디언트 (전역 bg-gradient-to-br 텍스트 강제 규칙 회피) */
+.wallet-overview-gradient {
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.82) 0%,
+    rgba(236, 254, 255, 0.9) 46%,
+    rgba(219, 234, 254, 0.82) 100%
+  ) !important;
+}
+
 /* 달력 크기 복구 */
 .calendar-cell-compact {
   height: 80px !important;
