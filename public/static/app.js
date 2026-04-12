@@ -495,14 +495,6 @@ function renderMonthlyWalletSnapshot(yearMonth) {
   const monthlyUsageTotal = state.transactions
     .filter(transaction => transaction.type === 'expense' || transaction.type === 'savings')
     .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
-  const snapshotAccounts = [...state.accounts].sort((a, b) => {
-    const aGoal = Number(a.savings_goal || 0) > 0 ? 1 : 0;
-    const bGoal = Number(b.savings_goal || 0) > 0 ? 1 : 0;
-    if (bGoal !== aGoal) return bGoal - aGoal;
-    const balanceDiff = Number(b.balance || 0) - Number(a.balance || 0);
-    if (balanceDiff !== 0) return balanceDiff;
-    return String(a.name || '').localeCompare(String(b.name || ''));
-  });
 
   return `
     <div class="bg-white p-6 rounded-lg shadow space-y-5">
@@ -544,7 +536,7 @@ function renderMonthlyWalletSnapshot(yearMonth) {
             <p class="text-sm text-gray-500">${t('wallet.no_accounts')}</p>
           ` : `
             <div class="space-y-3">
-              ${snapshotAccounts.slice(0, 4).map(account => {
+              ${state.accounts.slice(0, 4).map(account => {
                 const meta = getWalletAccountTypeMeta(account.type);
                 return `
                   <div class="border border-gray-200 rounded-lg p-3 flex items-center justify-between gap-3">
@@ -569,62 +561,67 @@ function renderMonthlyWalletSnapshot(yearMonth) {
   `;
 }
 
-function renderWalletAccountOverview(totalBalance, accountUsageSummary = {}, accounts = state.accounts) {
+function renderWalletAccountOverview(totalBalance, accountUsageSummary = {}) {
   return `
-    <section class="bg-white rounded-lg shadow p-6 space-y-5">
-      <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-        <div>
-          <p class="text-sm font-semibold text-cyan-700">${t('wallet.account_overview')}</p>
-          <h3 class="mt-2 text-3xl font-bold text-gray-900">${formatCurrencyByCode(totalBalance)}</h3>
-          <p class="mt-2 text-sm text-gray-500">${t('wallet.account_overview_desc')}</p>
-        </div>
-        <div class="inline-flex w-fit items-center gap-3 rounded-xl border border-gray-100 bg-gray-50/70 px-4 py-3">
-          <div class="flex h-11 w-11 items-center justify-center rounded-xl bg-cyan-100 text-cyan-700">
-            <i class="fas fa-wallet text-lg"></i>
-          </div>
+    <section class="relative overflow-hidden rounded-[28px] border border-white/70 bg-gradient-to-br from-white/80 via-cyan-50/90 to-blue-100/80 p-6 shadow-lg backdrop-blur-xl">
+      <div class="absolute -top-12 right-0 h-32 w-32 rounded-full bg-cyan-200/40 blur-3xl"></div>
+      <div class="absolute -bottom-10 left-8 h-24 w-24 rounded-full bg-blue-200/30 blur-3xl"></div>
+
+      <div class="relative z-10 space-y-5">
+        <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <p class="text-xs text-gray-500">${t('wallet.account_count')}</p>
-            <p class="text-xl font-bold text-gray-900">${accounts.length}</p>
+            <p class="text-sm font-semibold text-cyan-700">${t('wallet.account_overview')}</p>
+            <h3 class="mt-2 text-3xl font-bold text-slate-900">${formatCurrencyByCode(totalBalance)}</h3>
+            <p class="mt-2 text-sm text-slate-600">${t('wallet.account_overview_desc')}</p>
+          </div>
+          <div class="inline-flex w-fit items-center gap-3 rounded-2xl border border-white/80 bg-white/70 px-4 py-3 shadow-sm">
+            <div class="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-100 text-cyan-700">
+              <i class="fas fa-wallet text-lg"></i>
+            </div>
+            <div>
+              <p class="text-xs text-slate-500">${t('wallet.account_count')}</p>
+              <p class="text-xl font-bold text-slate-900">${state.accounts.length}</p>
+            </div>
           </div>
         </div>
+
+        ${state.accounts.length === 0 ? `
+          <div class="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-6 text-center text-slate-500">
+            ${t('wallet.no_accounts')}
+          </div>
+        ` : `
+          <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+            ${state.accounts.map(account => {
+              const meta = getWalletAccountTypeMeta(account.type);
+              const accentClasses = getWalletAccentClasses(meta.accent);
+              const accountUsage = accountUsageSummary[account.id] || { total: 0, count: 0 };
+
+              return `
+                <article class="rounded-2xl border border-white/80 bg-white/75 p-4 shadow-sm backdrop-blur-sm">
+                  <div class="flex items-start justify-between gap-3">
+                    <div class="min-w-0">
+                      <p class="truncate text-base font-semibold text-slate-900">${account.name}</p>
+                      <p class="mt-1 text-xs text-slate-500">${meta.label}</p>
+                    </div>
+                    <div class="flex h-10 w-10 items-center justify-center rounded-2xl ${accentClasses.panel}">
+                      <i class="fas ${meta.icon}"></i>
+                    </div>
+                  </div>
+                  <div class="mt-4">
+                    <p class="text-xs text-slate-500">${t('common.balance')}</p>
+                    <p class="mt-1 text-xl font-bold text-slate-900">${formatCurrencyByCode(account.balance, account.currency)}</p>
+                  </div>
+                  <div class="mt-3 pt-3 border-t border-slate-100">
+                    <p class="text-xs text-slate-500">${t('wallet.monthly_usage')}</p>
+                    <p class="mt-1 text-sm font-semibold text-rose-600">${formatCurrencyByCode(accountUsage.total, account.currency)}</p>
+                    <p class="mt-1 text-xs text-slate-400">${accountUsage.count}${getLanguage() === 'ko' ? '건 연결' : ' linked items'}</p>
+                  </div>
+                </article>
+              `;
+            }).join('')}
+          </div>
+        `}
       </div>
-
-      ${accounts.length === 0 ? `
-        <div class="rounded-xl border border-dashed border-gray-300 bg-gray-50/70 p-6 text-center text-gray-500">
-          ${t('wallet.no_accounts')}
-        </div>
-      ` : `
-        <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
-          ${accounts.map(account => {
-            const meta = getWalletAccountTypeMeta(account.type);
-            const accentClasses = getWalletAccentClasses(meta.accent);
-            const accountUsage = accountUsageSummary[account.id] || { total: 0, count: 0 };
-
-            return `
-              <article class="rounded-xl border border-gray-100 bg-gray-50/70 p-4">
-                <div class="flex items-start justify-between gap-3">
-                  <div class="min-w-0">
-                    <p class="truncate text-base font-semibold text-gray-900">${account.name}</p>
-                    <p class="mt-1 text-xs text-gray-500">${meta.label}</p>
-                  </div>
-                  <div class="flex h-10 w-10 items-center justify-center rounded-xl ${accentClasses.panel}">
-                    <i class="fas ${meta.icon}"></i>
-                  </div>
-                </div>
-                <div class="mt-4">
-                  <p class="text-xs text-gray-500">${t('common.balance')}</p>
-                  <p class="mt-1 text-xl font-bold text-gray-900">${formatCurrencyByCode(account.balance, account.currency)}</p>
-                </div>
-                <div class="mt-3 border-t border-gray-200 pt-3">
-                  <p class="text-xs text-gray-500">${t('wallet.monthly_usage')}</p>
-                  <p class="mt-1 text-sm font-semibold text-rose-600">${formatCurrencyByCode(accountUsage.total, account.currency)}</p>
-                  <p class="mt-1 text-xs text-gray-400">${accountUsage.count}${getLanguage() === 'ko' ? '건 연결' : ' linked items'}</p>
-                </div>
-              </article>
-            `;
-          }).join('')}
-        </div>
-      `}
     </section>
   `;
 }
@@ -1972,40 +1969,6 @@ async function renderHomeView() {
         </div>
       </div>
       
-      <!-- 빠른 액션 버튼 -->
-      <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
-        <button onclick="switchView('month')" 
-                class="bg-blue-500 hover:bg-blue-600 text-white p-4 rounded-lg shadow-lg transition-all">
-          <i class="fas fa-calendar-alt text-2xl mb-2"></i>
-          <p class="font-medium">${t('home.monthly_view')}</p>
-        </button>
-        <button onclick="switchView('budgets')" 
-                class="bg-green-500 hover:bg-green-600 text-white p-4 rounded-lg shadow-lg transition-all">
-          <i class="fas fa-chart-pie text-2xl mb-2"></i>
-          <p class="font-medium">${t('budget.title')}</p>
-        </button>
-        <button onclick="switchView('savings')" 
-                class="bg-purple-500 hover:bg-purple-600 text-white p-4 rounded-lg shadow-lg transition-all">
-          <i class="fas fa-piggy-bank text-2xl mb-2"></i>
-          <p class="font-medium">${t('savings.title')}</p>
-        </button>
-        <button onclick="switchView('wallet')" 
-                class="bg-cyan-600 hover:bg-cyan-700 text-white p-4 rounded-lg shadow-lg transition-all">
-          <i class="fas fa-wallet text-2xl mb-2"></i>
-          <p class="font-medium">${t('tab.wallet')}</p>
-        </button>
-        <button onclick="switchView('fixed-expenses')" 
-                class="bg-rose-500 hover:bg-rose-600 text-white p-4 rounded-lg shadow-lg transition-all">
-          <i class="fas fa-redo text-2xl mb-2"></i>
-          <p class="font-medium">${t('tab.fixed_expenses')}</p>
-        </button>
-        <button onclick="switchView('reports')" 
-                class="bg-orange-500 hover:bg-orange-600 text-white p-4 rounded-lg shadow-lg transition-all">
-          <i class="fas fa-chart-bar text-2xl mb-2"></i>
-          <p class="font-medium">${t('report.title')}</p>
-        </button>
-      </div>
-
       <!-- 저축률 달성 바 -->
       <div class="bg-white p-6 rounded-lg shadow-lg">
         <div class="flex justify-between items-center mb-3">
@@ -2045,6 +2008,40 @@ async function renderHomeView() {
         <div class="h-64">
           <canvas id="home-comparison-chart"></canvas>
         </div>
+      </div>
+      
+      <!-- 빠른 액션 버튼 -->
+      <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
+        <button onclick="switchView('month')" 
+                class="bg-blue-500 hover:bg-blue-600 text-white p-4 rounded-lg shadow-lg transition-all">
+          <i class="fas fa-calendar-alt text-2xl mb-2"></i>
+          <p class="font-medium">${t('home.monthly_view')}</p>
+        </button>
+        <button onclick="switchView('budgets')" 
+                class="bg-green-500 hover:bg-green-600 text-white p-4 rounded-lg shadow-lg transition-all">
+          <i class="fas fa-chart-pie text-2xl mb-2"></i>
+          <p class="font-medium">${t('budget.title')}</p>
+        </button>
+        <button onclick="switchView('savings')" 
+                class="bg-purple-500 hover:bg-purple-600 text-white p-4 rounded-lg shadow-lg transition-all">
+          <i class="fas fa-piggy-bank text-2xl mb-2"></i>
+          <p class="font-medium">${t('savings.title')}</p>
+        </button>
+        <button onclick="switchView('wallet')" 
+                class="bg-cyan-600 hover:bg-cyan-700 text-white p-4 rounded-lg shadow-lg transition-all">
+          <i class="fas fa-wallet text-2xl mb-2"></i>
+          <p class="font-medium">${t('tab.wallet')}</p>
+        </button>
+        <button onclick="switchView('fixed-expenses')" 
+                class="bg-rose-500 hover:bg-rose-600 text-white p-4 rounded-lg shadow-lg transition-all">
+          <i class="fas fa-redo text-2xl mb-2"></i>
+          <p class="font-medium">${t('tab.fixed_expenses')}</p>
+        </button>
+        <button onclick="switchView('reports')" 
+                class="bg-orange-500 hover:bg-orange-600 text-white p-4 rounded-lg shadow-lg transition-all">
+          <i class="fas fa-chart-bar text-2xl mb-2"></i>
+          <p class="font-medium">${t('report.title')}</p>
+        </button>
       </div>
     </div>
   `;
@@ -2290,13 +2287,18 @@ async function renderMonthView() {
         </div>
       </div>
       
-      ${renderMonthlyWalletSnapshot(yearMonth)}
-
+      <!-- 수입/지출/저축 비율 파이차트 -->
+      <div class="bg-white p-6 rounded-lg shadow">
+        <h3 class="text-xl font-bold mb-4">${t('month.monthly_ratio')}</h3>
+        <div class="flex justify-center">
+          <canvas id="month-pie-chart" style="max-width: 300px; max-height: 300px;"></canvas>
+        </div>
+      </div>
+      
       <!-- 예산 vs 지출 그래프 -->
       ${renderBudgetChart(budgetData, '월별')}
 
-      <!-- 카테고리별 지출 바 그래프 -->
-      ${renderExpenseBarChart(expenseByCategory, '월별')}
+      ${renderMonthlyWalletSnapshot(yearMonth)}
       
       <!-- 저축 목표 진행 상황 -->
       <div class="bg-white p-6 rounded-lg shadow">
@@ -2311,20 +2313,15 @@ async function renderMonthView() {
         </div>
       </div>
       
-      <!-- 수입/지출/저축 비율 파이차트 -->
-      <div class="bg-white p-6 rounded-lg shadow">
-        <h3 class="text-xl font-bold mb-4">${t('month.monthly_ratio')}</h3>
-        <div class="flex justify-center">
-          <canvas id="month-pie-chart" style="max-width: 300px; max-height: 300px;"></canvas>
-        </div>
-      </div>
-      
       <!-- 달력 -->
       <div class="bg-white p-6 rounded-lg shadow">
         <h3 class="text-xl font-bold mb-4">${t('month.monthly_calendar')}</h3>
         ${renderCalendar(calendarData, fixedExpenseMap)}
       </div>
-
+      
+      <!-- 카테고리별 지출 바 그래프 -->
+      ${renderExpenseBarChart(expenseByCategory, '월별')}
+      
       <!-- 거래 내역 -->
       <div class="bg-white p-6 rounded-lg shadow">
         <div class="flex justify-between items-center mb-4">
@@ -2445,28 +2442,10 @@ async function renderSavingsGoalsProgress() {
       return;
     }
     
-    const sortedSavingsAccounts = [...state.savingsAccounts].sort((a, b) => {
-      const aGoal = Number(a.savings_goal || 0) > 0 ? 1 : 0;
-      const bGoal = Number(b.savings_goal || 0) > 0 ? 1 : 0;
-      if (bGoal !== aGoal) return bGoal - aGoal;
-
-      if (aGoal && bGoal) {
-        const aCurrent = Number(a.balance ?? a.total_savings ?? 0);
-        const bCurrent = Number(b.balance ?? b.total_savings ?? 0);
-        const aProgress = Number(a.savings_goal || 0) > 0 ? aCurrent / Number(a.savings_goal || 1) : 0;
-        const bProgress = Number(b.savings_goal || 0) > 0 ? bCurrent / Number(b.savings_goal || 1) : 0;
-        if (aProgress !== bProgress) return aProgress - bProgress;
-      }
-
-      const balanceDiff = Number(b.balance ?? b.total_savings ?? 0) - Number(a.balance ?? a.total_savings ?? 0);
-      if (balanceDiff !== 0) return balanceDiff;
-      return String(a.name || '').localeCompare(String(b.name || ''));
-    });
-
     // 모든 계좌 표시 (목표 유무 관계없이)
     let html = '<div class="space-y-4">';
     
-    sortedSavingsAccounts.forEach(account => {
+    state.savingsAccounts.forEach(account => {
       const hasGoal = account.savings_goal && account.savings_goal > 0;
       
       if (!hasGoal) {
@@ -3057,11 +3036,16 @@ async function renderWeekView() {
         </div>
       </div>
       
+      <!-- 수입/지출/저축 비율 파이차트 -->
+      <div class="bg-white p-6 rounded-lg shadow">
+        <h3 class="text-xl font-bold mb-4">${t('week.weekly_ratio')}</h3>
+        <div class="flex justify-center">
+          <canvas id="week-pie-chart" style="max-width: 300px; max-height: 300px;"></canvas>
+        </div>
+      </div>
+      
       <!-- 주간 예산 vs 지출 그래프 -->
       ${renderBudgetChart(budgetData, '주별')}
-
-      <!-- 주간 카테고리별 지출 바 그래프 -->
-      ${renderExpenseBarChart(expenseByCategory, '주별')}
       
       <!-- 저축 목표 진행 상황 -->
       <div class="bg-white p-6 rounded-lg shadow">
@@ -3076,13 +3060,8 @@ async function renderWeekView() {
         </div>
       </div>
       
-      <!-- 수입/지출/저축 비율 파이차트 -->
-      <div class="bg-white p-6 rounded-lg shadow">
-        <h3 class="text-xl font-bold mb-4">${t('week.weekly_ratio')}</h3>
-        <div class="flex justify-center">
-          <canvas id="week-pie-chart" style="max-width: 300px; max-height: 300px;"></canvas>
-        </div>
-      </div>
+      <!-- 주간 카테고리별 지출 바 그래프 -->
+      ${renderExpenseBarChart(expenseByCategory, '주별')}
       
       <div class="bg-white p-6 rounded-lg shadow">
         <div class="flex justify-between items-center mb-4">
@@ -3107,25 +3086,7 @@ async function renderWeekView() {
 async function renderSavingsView() {
   await fetchSavingsAccounts();
   
-  const orderedSavingsAccounts = [...state.savingsAccounts].sort((a, b) => {
-    const aGoal = Number(a.savings_goal || 0) > 0 ? 1 : 0;
-    const bGoal = Number(b.savings_goal || 0) > 0 ? 1 : 0;
-    if (bGoal !== aGoal) return bGoal - aGoal;
-
-    const aCurrent = Number(a.total_savings ?? a.balance ?? 0);
-    const bCurrent = Number(b.total_savings ?? b.balance ?? 0);
-
-    if (aGoal && bGoal) {
-      const aProgress = Number(a.savings_goal || 0) > 0 ? aCurrent / Number(a.savings_goal || 1) : 0;
-      const bProgress = Number(b.savings_goal || 0) > 0 ? bCurrent / Number(b.savings_goal || 1) : 0;
-      if (aProgress !== bProgress) return aProgress - bProgress;
-    }
-
-    if (bCurrent !== aCurrent) return bCurrent - aCurrent;
-    return String(a.name || '').localeCompare(String(b.name || ''));
-  });
-
-  const totalSavings = orderedSavingsAccounts.reduce((sum, acc) => sum + (acc.total_savings || 0), 0);
+  const totalSavings = state.savingsAccounts.reduce((sum, acc) => sum + (acc.total_savings || 0), 0);
   
   const contentArea = document.getElementById('content-area');
   contentArea.innerHTML = `
@@ -3142,7 +3103,7 @@ async function renderSavingsView() {
         </button>
       </div>
       
-      ${orderedSavingsAccounts.length === 0 ? `
+      ${state.savingsAccounts.length === 0 ? `
         <div class="bg-white p-8 rounded-lg shadow text-center">
           <i class="fas fa-piggy-bank text-6xl text-gray-300 mb-4"></i>
           <h3 class="text-xl font-semibold text-gray-700 mb-2">${t('savings.no_accounts')}</h3>
@@ -3154,7 +3115,7 @@ async function renderSavingsView() {
         </div>
       ` : `
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          ${orderedSavingsAccounts.map(acc => {
+          ${state.savingsAccounts.map(acc => {
           const savingsGoal = acc.savings_goal || 0;
           const currentSavings = acc.total_savings || 0;
           const progress = savingsGoal > 0 ? Math.min((currentSavings / savingsGoal) * 100, 100) : 0;
@@ -3224,7 +3185,6 @@ async function renderWalletView() {
   const daysInMonth = getDaysInMonth(state.currentMonth || new Date());
   const contentArea = document.getElementById('content-area');
   const currentWallet = getCurrentWallet();
-  const isWalletOwner = Number(currentWallet?.owner_user_id) === Number(state.currentUser?.id);
 
   if (!currentWallet) {
     contentArea.innerHTML = `
@@ -3259,17 +3219,19 @@ async function renderWalletView() {
   const savingsGoalCount = state.accounts.filter(account => Number(account.savings_goal || 0) > 0).length;
   const recentTransfers = state.transfers.slice(0, 8);
   const monthlyUsage = state.walletTransactions
-    .filter(transaction => ['expense', 'savings', 'withdrawal'].includes(transaction.type))
+    .filter(transaction => ['income', 'expense', 'savings', 'withdrawal'].includes(transaction.type))
     .sort((a, b) => {
       if (a.date === b.date) return (b.id || 0) - (a.id || 0);
       return b.date.localeCompare(a.date);
     });
   const unassignedExpenseTransactions = monthlyUsage.filter(transaction => transaction.type === 'expense' && !transaction.account_id);
-  const monthlyUsageTotal = monthlyUsage.reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+  const monthlyUsageTotal = monthlyUsage
+    .filter(transaction => transaction.type !== 'income')
+    .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
   const usageByMethod = ['card', 'cash', 'transfer'].map(method => ({
     method,
     total: monthlyUsage
-      .filter(transaction => (transaction.payment_method || 'card') === method)
+      .filter(transaction => transaction.type === 'expense' && (transaction.payment_method || 'card') === method)
       .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0)
   }));
   const accountUsageSummary = monthlyUsage.reduce((accumulator, transaction) => {
@@ -3314,22 +3276,9 @@ async function renderWalletView() {
         return accumulator;
       }, {})
   ).sort((a, b) => b.total - a.total);
-  const sortedAccounts = [...state.accounts].sort((a, b) => {
-    const aUsage = Number(accountUsageSummary[a.id]?.total || 0);
-    const bUsage = Number(accountUsageSummary[b.id]?.total || 0);
-    if (bUsage !== aUsage) return bUsage - aUsage;
-
-    const aGoal = Number(a.savings_goal || 0) > 0 ? 1 : 0;
-    const bGoal = Number(b.savings_goal || 0) > 0 ? 1 : 0;
-    if (bGoal !== aGoal) return bGoal - aGoal;
-
-    const balanceDiff = Number(b.balance || 0) - Number(a.balance || 0);
-    if (balanceDiff !== 0) return balanceDiff;
-    return String(a.name || '').localeCompare(String(b.name || ''));
-  });
 
   contentArea.innerHTML = `
-    <div class="space-y-6">
+    <div class="space-y-6 wallet-view">
       <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
           <h2 class="text-2xl font-bold text-gray-800">${t('wallet.title')}</h2>
@@ -3337,36 +3286,40 @@ async function renderWalletView() {
           <p class="text-xs text-gray-400 mt-2">${yearMonth}</p>
         </div>
         <div class="flex flex-wrap gap-2">
-          <button onclick="openWalletModal()" class="px-4 py-2 bg-white text-cyan-700 border border-cyan-200 rounded-lg hover:bg-cyan-50">
+          <button onclick="openWalletModal()" class="wallet-action-button px-4 py-2 bg-white text-cyan-700 border border-cyan-200 rounded-lg hover:bg-cyan-50">
             <i class="fas fa-layer-group mr-2"></i>${t('wallet.create_wallet')}
           </button>
-          ${isWalletOwner ? `
-            <button onclick="deleteWallet(${currentWallet.id})" class="px-4 py-2 bg-white text-rose-600 border border-rose-200 rounded-lg hover:bg-rose-50">
-              <i class="fas fa-trash mr-2"></i>${t('wallet.delete_wallet')}
-            </button>
-          ` : ''}
-          <button onclick="openTransferModal()" class="px-4 py-2 bg-cyan-600 text-white rounded-lg hover:bg-cyan-700">
+          <button onclick="openJoinWalletModal()" class="wallet-action-button px-4 py-2 bg-white text-violet-700 border border-violet-200 rounded-lg hover:bg-violet-50">
+            <i class="fas fa-link mr-2"></i>${t('wallet.join_wallet')}
+          </button>
+          <button onclick="openWalletTransactionModal()" class="wallet-action-button px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700">
+            <i class="fas fa-receipt mr-2"></i>${t('wallet.new_transaction')}
+          </button>
+          <button onclick="openTransferModal()" class="wallet-action-button px-4 py-2 bg-cyan-600 text-white rounded-lg hover:bg-cyan-700">
             <i class="fas fa-exchange-alt mr-2"></i>${t('wallet.new_transfer')}
           </button>
-          <button onclick="openWalletAccountModal()" class="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600">
+          <button onclick="openWalletAccountModal()" class="wallet-action-button px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600">
             <i class="fas fa-plus mr-2"></i>${t('wallet.add_account')}
           </button>
         </div>
       </div>
 
-      <section class="bg-white rounded-2xl shadow p-5">
+      <section class="wallet-hover-surface bg-white rounded-2xl shadow p-5">
         <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
-            <div class="flex flex-wrap items-center gap-2">
-              <p class="text-sm font-semibold text-cyan-700">${t('wallet.current_wallet')}</p>
-              ${isWalletOwner ? `
-                <span class="inline-flex items-center rounded-full bg-cyan-50 px-2.5 py-1 text-xs font-semibold text-cyan-700">
-                  ${t('wallet.owner_badge')}
-                </span>
-              ` : ''}
-            </div>
+            <p class="text-sm font-semibold text-cyan-700">${t('wallet.current_wallet')}</p>
             <h3 class="text-2xl font-bold text-gray-900 mt-1">${currentWallet.name}</h3>
             <p class="text-sm text-gray-500 mt-1">${currentWallet.description || t('wallet.wallet_selector_desc')}</p>
+            ${currentWallet.invite_code ? `
+              <div class="mt-3 flex flex-wrap items-center gap-2">
+                <span class="inline-flex items-center rounded-full bg-violet-50 px-3 py-1 text-xs font-semibold text-violet-700">
+                  ${t('wallet.invite_code')}: ${currentWallet.invite_code}
+                </span>
+                <button onclick="copyWalletInviteCode('${currentWallet.invite_code}')" class="wallet-action-button px-3 py-1.5 text-xs bg-white text-violet-700 border border-violet-200 rounded-lg hover:bg-violet-50">
+                  <i class="fas fa-copy mr-1"></i>${t('wallet.copy_code')}
+                </button>
+              </div>
+            ` : ''}
           </div>
           <div class="w-full md:w-80">
             <label class="block text-xs font-medium text-gray-500 mb-2">${t('wallet.switch_wallet')}</label>
@@ -3381,41 +3334,41 @@ async function renderWalletView() {
         </div>
       </section>
 
+      ${renderWalletBulkAssignment(unassignedExpenseTransactions)}
+
+      ${renderWalletAccountOverview(totalBalance, accountUsageSummary)}
+
       <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
-        <div class="bg-white rounded-lg shadow p-5">
+        <div class="wallet-hover-surface bg-white rounded-lg shadow p-5">
           <p class="text-sm text-gray-500">${t('home.total_assets')}</p>
           <p class="text-3xl font-bold text-gray-900 mt-2">${formatCurrencyByCode(totalBalance)}</p>
         </div>
-        <div class="bg-white rounded-lg shadow p-5">
-          <p class="text-sm text-gray-500">${t('wallet.goal_count')}</p>
-          <p class="text-3xl font-bold text-green-700 mt-2">${savingsGoalCount}${getLanguage() === 'ko' ? '개' : ''}</p>
-        </div>
-        <div class="bg-white rounded-lg shadow p-5">
+        <div class="wallet-hover-surface bg-white rounded-lg shadow p-5">
           <p class="text-sm text-gray-500">${t('wallet.account_count')}</p>
           <p class="text-3xl font-bold text-cyan-700 mt-2">${state.accounts.length}</p>
         </div>
-        <div class="bg-white rounded-lg shadow p-5">
-          <p class="text-sm text-gray-500">${t('wallet.monthly_transfer_volume')}</p>
-          <p class="text-3xl font-bold text-violet-700 mt-2">${formatCurrencyByCode(transferVolume)}</p>
-        </div>
-        <div class="bg-white rounded-lg shadow p-5">
+        <div class="wallet-hover-surface bg-white rounded-lg shadow p-5">
           <p class="text-sm text-gray-500">${t('wallet.member_count')}</p>
           <p class="text-3xl font-bold text-slate-700 mt-2">${currentWallet.member_count || 1}</p>
         </div>
+        <div class="wallet-hover-surface bg-white rounded-lg shadow p-5">
+          <p class="text-sm text-gray-500">${t('wallet.monthly_transfer_volume')}</p>
+          <p class="text-3xl font-bold text-violet-700 mt-2">${formatCurrencyByCode(transferVolume)}</p>
+        </div>
+        <div class="wallet-hover-surface bg-white rounded-lg shadow p-5">
+          <p class="text-sm text-gray-500">${t('wallet.goal_count')}</p>
+          <p class="text-3xl font-bold text-green-700 mt-2">${savingsGoalCount}${getLanguage() === 'ko' ? '개' : ''}</p>
+        </div>
       </div>
 
-      ${renderWalletBulkAssignment(unassignedExpenseTransactions)}
-
-      ${renderWalletAccountOverview(totalBalance, accountUsageSummary, sortedAccounts)}
-
-      <div class="grid grid-cols-1 xl:grid-cols-5 gap-6">
-        <section class="xl:col-span-3 bg-white rounded-lg shadow p-6">
+      <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        <section class="wallet-hover-surface xl:col-span-2 bg-white rounded-lg shadow p-6">
           <div class="flex items-center justify-between mb-4">
             <h3 class="text-xl font-bold text-gray-800">${t('wallet.accounts')}</h3>
-            <span class="text-sm text-gray-500">${sortedAccounts.length}${getLanguage() === 'ko' ? '개' : ''}</span>
+            <span class="text-sm text-gray-500">${state.accounts.length}${getLanguage() === 'ko' ? '개' : ''}</span>
           </div>
 
-          ${sortedAccounts.length === 0 ? `
+          ${state.accounts.length === 0 ? `
             <div class="border border-dashed border-gray-300 rounded-xl p-8 text-center">
               <i class="fas fa-wallet text-4xl text-gray-300 mb-3"></i>
               <p class="text-gray-500 mb-4">${t('wallet.no_accounts')}</p>
@@ -3423,14 +3376,14 @@ async function renderWalletView() {
                 ${t('wallet.add_first_account')}
               </button>
             </div>
-            ` : `
+          ` : `
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-              ${sortedAccounts.map(account => {
+              ${state.accounts.map(account => {
                 const meta = getWalletAccountTypeMeta(account.type);
                 const accentClasses = getWalletAccentClasses(meta.accent);
 
                 return `
-                  <article class="border border-gray-200 rounded-xl p-4 hover:shadow-md transition">
+                  <article class="wallet-hover-surface border border-gray-200 rounded-xl p-4 hover:shadow-md transition">
                     <div class="flex items-start justify-between gap-3">
                       <div class="flex items-start gap-3">
                         <div class="w-12 h-12 rounded-xl flex items-center justify-center ${accentClasses.panel}">
@@ -3479,44 +3432,74 @@ async function renderWalletView() {
           `}
         </section>
 
-        <section class="xl:col-span-2 bg-white rounded-lg shadow p-6">
-          <div class="flex items-center justify-between mb-4">
-            <h3 class="text-xl font-bold text-gray-800">${t('wallet.savings_goals')}</h3>
-            <span class="text-sm text-green-600 font-medium">${savingsGoalCount}${getLanguage() === 'ko' ? '개 목표' : ' goals'}</span>
-          </div>
-          ${renderSavingsGoalCards(null, sortedAccounts)}
-        </section>
-      </div>
-
-      <div class="grid grid-cols-1 xl:grid-cols-5 gap-6">
-        <section class="xl:col-span-3 bg-white rounded-lg shadow p-6">
-          <h3 class="text-xl font-bold text-gray-800 mb-4">${t('wallet.category_usage')}</h3>
-          ${renderWalletCategoryUsage(expenseCategoryUsage)}
-        </section>
-
-        <section class="xl:col-span-2 bg-white rounded-lg shadow p-6">
-          <h3 class="text-xl font-bold text-gray-800 mb-4">${t('wallet.usage_by_method')}</h3>
-          <div class="space-y-3">
-            ${usageByMethod.map(item => {
-              const meta = getPaymentMethodMeta(item.method);
-              return `
-                <div class="flex items-center justify-between rounded-xl border border-gray-100 p-4">
-                  <div class="flex items-center gap-3">
-                    <div class="w-10 h-10 rounded-full flex items-center justify-center ${meta.classes}">
-                      <i class="fas ${meta.icon}"></i>
+        <div class="space-y-6">
+          <section class="wallet-hover-surface bg-white rounded-lg shadow p-6">
+            <h3 class="text-xl font-bold text-gray-800 mb-4">${t('wallet.usage_by_method')}</h3>
+            <div class="space-y-3">
+              ${usageByMethod.map(item => {
+                const meta = getPaymentMethodMeta(item.method);
+                return `
+                  <div class="wallet-hover-surface flex items-center justify-between rounded-xl border border-gray-100 p-4">
+                    <div class="flex items-center gap-3">
+                      <div class="w-10 h-10 rounded-full flex items-center justify-center ${meta.classes}">
+                        <i class="fas ${meta.icon}"></i>
+                      </div>
+                      <span class="font-medium text-gray-900">${meta.label}</span>
                     </div>
-                    <span class="font-medium text-gray-900">${meta.label}</span>
+                    <span class="text-lg font-bold text-gray-900">${formatCurrencyByCode(item.total)}</span>
                   </div>
-                  <span class="text-lg font-bold text-gray-900">${formatCurrencyByCode(item.total)}</span>
-                </div>
-              `;
-            }).join('')}
-          </div>
-        </section>
+                `;
+              }).join('')}
+            </div>
+          </section>
+
+          <section class="wallet-hover-surface bg-white rounded-lg shadow p-6">
+            <h3 class="text-xl font-bold text-gray-800 mb-4">${t('wallet.category_usage')}</h3>
+            ${renderWalletCategoryUsage(expenseCategoryUsage)}
+          </section>
+
+          <section class="wallet-hover-surface bg-white rounded-lg shadow p-6">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-xl font-bold text-gray-800">${t('wallet.recent_transfers')}</h3>
+              <button onclick="openTransferModal()" class="text-sm text-cyan-600 hover:text-cyan-700 font-medium">
+                ${t('wallet.new_transfer')}
+              </button>
+            </div>
+
+            ${recentTransfers.length === 0 ? `
+              <div class="border border-dashed border-gray-300 rounded-xl p-8 text-center">
+                <i class="fas fa-exchange-alt text-4xl text-gray-300 mb-3"></i>
+                <p class="text-gray-500">${t('wallet.no_transfers')}</p>
+              </div>
+            ` : `
+              <div class="space-y-3">
+                ${recentTransfers.map(transfer => `
+                  <div class="wallet-hover-surface border border-gray-100 rounded-xl p-4">
+                    <div class="flex items-center justify-between gap-3">
+                      <div>
+                        <p class="font-semibold text-gray-900">${transfer.from_account_name || '-'}</p>
+                        <p class="text-xs text-gray-500 mt-1">
+                          <i class="fas fa-arrow-right mr-1"></i>${transfer.to_account_name || '-'}
+                        </p>
+                      </div>
+                      <div class="text-right">
+                        <p class="font-bold text-cyan-700">${formatCurrencyByCode(transfer.amount)}</p>
+                        <p class="text-xs text-gray-500 mt-1">${transfer.transfer_date}</p>
+                      </div>
+                    </div>
+                    ${transfer.description ? `
+                      <p class="text-sm text-gray-500 mt-3">${transfer.description}</p>
+                    ` : ''}
+                  </div>
+                `).join('')}
+              </div>
+            `}
+          </section>
+        </div>
       </div>
 
       <div class="grid grid-cols-1 xl:grid-cols-5 gap-6">
-        <section class="xl:col-span-3 bg-white rounded-lg shadow p-6">
+        <section class="wallet-hover-surface xl:col-span-3 bg-white rounded-lg shadow p-6">
           <div class="flex items-center justify-between mb-4">
             <h3 class="text-xl font-bold text-gray-800">${t('wallet.recent_usage')}</h3>
             <div class="text-right">
@@ -3534,8 +3517,14 @@ async function renderWalletView() {
             <div class="space-y-3">
               ${monthlyUsage.slice(0, 8).map(transaction => {
                 const meta = getPaymentMethodMeta(transaction.payment_method || 'card');
+                const isIncome = transaction.type === 'income';
+                const isSavings = transaction.type === 'savings';
+                const amountClass = isIncome ? 'text-blue-700' : (isSavings ? 'text-green-700' : 'text-rose-600');
+                const typeLabel = isIncome
+                  ? t('transaction.type.income')
+                  : (isSavings ? t('transaction.type.savings') : t('common.expense'));
                 return `
-                  <div class="border border-gray-100 rounded-xl p-4 flex items-center justify-between gap-4">
+                  <div class="wallet-hover-surface border border-gray-100 rounded-xl p-4 flex items-center justify-between gap-4">
                     <div class="flex items-center gap-3 min-w-0">
                       <div class="w-10 h-10 rounded-full flex items-center justify-center ${meta.classes}">
                         <i class="fas ${meta.icon}"></i>
@@ -3556,8 +3545,8 @@ async function renderWalletView() {
                       </div>
                     </div>
                     <div class="text-right">
-                      <p class="font-bold ${transaction.type === 'savings' ? 'text-green-700' : 'text-rose-600'}">${formatCurrencyByCode(transaction.amount)}</p>
-                      <p class="text-xs text-gray-500 mt-1">${transaction.type === 'savings' ? t('transaction.type.savings') : t('common.expense')}</p>
+                      <p class="font-bold ${amountClass}">${formatCurrencyByCode(transaction.amount)}</p>
+                      <p class="text-xs text-gray-500 mt-1">${typeLabel}</p>
                     </div>
                   </div>
                 `;
@@ -3566,42 +3555,12 @@ async function renderWalletView() {
           `}
         </section>
 
-        <section class="xl:col-span-2 bg-white rounded-lg shadow p-6">
+        <section class="wallet-hover-surface xl:col-span-2 bg-white rounded-lg shadow p-6">
           <div class="flex items-center justify-between mb-4">
-            <h3 class="text-xl font-bold text-gray-800">${t('wallet.recent_transfers')}</h3>
-            <button onclick="openTransferModal()" class="text-sm text-cyan-600 hover:text-cyan-700 font-medium">
-              ${t('wallet.new_transfer')}
-            </button>
+            <h3 class="text-xl font-bold text-gray-800">${t('wallet.savings_goals')}</h3>
+            <span class="text-sm text-green-600 font-medium">${savingsGoalCount}${getLanguage() === 'ko' ? '개 목표' : ' goals'}</span>
           </div>
-
-          ${recentTransfers.length === 0 ? `
-            <div class="border border-dashed border-gray-300 rounded-xl p-8 text-center">
-              <i class="fas fa-exchange-alt text-4xl text-gray-300 mb-3"></i>
-              <p class="text-gray-500">${t('wallet.no_transfers')}</p>
-            </div>
-          ` : `
-            <div class="space-y-3">
-              ${recentTransfers.map(transfer => `
-                <div class="border border-gray-100 rounded-xl p-4">
-                  <div class="flex items-center justify-between gap-3">
-                    <div>
-                      <p class="font-semibold text-gray-900">${transfer.from_account_name || '-'}</p>
-                      <p class="text-xs text-gray-500 mt-1">
-                        <i class="fas fa-arrow-right mr-1"></i>${transfer.to_account_name || '-'}
-                      </p>
-                    </div>
-                    <div class="text-right">
-                      <p class="font-bold text-cyan-700">${formatCurrencyByCode(transfer.amount)}</p>
-                      <p class="text-xs text-gray-500 mt-1">${transfer.transfer_date}</p>
-                    </div>
-                  </div>
-                  ${transfer.description ? `
-                    <p class="text-sm text-gray-500 mt-3">${transfer.description}</p>
-                  ` : ''}
-                </div>
-              `).join('')}
-            </div>
-          `}
+          ${renderSavingsGoalCards(null, state.accounts)}
         </section>
       </div>
     </div>
@@ -3669,32 +3628,201 @@ async function handleWalletCreate(event) {
   }
 }
 
-async function deleteWallet(walletId) {
-  const wallet = state.wallets.find(item => Number(item.id) === Number(walletId));
-  if (!wallet) {
-    alert(t('wallet.select_wallet_first'));
-    return;
-  }
+function copyWalletInviteCode(code) {
+  if (!code) return;
 
-  if (Number(wallet.owner_user_id) !== Number(state.currentUser?.id)) {
-    alert(t('wallet.delete_wallet_forbidden'));
-    return;
-  }
+  navigator.clipboard.writeText(String(code))
+    .then(() => alert(t('wallet.code_copied')))
+    .catch(() => alert(code));
+}
 
-  if (!confirm(t('wallet.delete_wallet_confirm'))) {
+function openJoinWalletModal() {
+  const modalContainer = document.getElementById('modal-container');
+
+  modalContainer.innerHTML = `
+    <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onclick="closeModal(event)">
+      <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4" onclick="event.stopPropagation()">
+        <h3 class="text-xl font-bold mb-4">${t('wallet.join_by_code')}</h3>
+        <form onsubmit="handleJoinWalletSubmit(event)" class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('wallet.invite_code')}</label>
+            <input type="text" name="invite_code" class="w-full px-4 py-2 border rounded uppercase" maxlength="12" required placeholder="${t('wallet.invite_code_placeholder')}">
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('wallet.nickname_optional')}</label>
+            <input type="text" name="nickname" class="w-full px-4 py-2 border rounded" maxlength="30" placeholder="${t('common.optional')}">
+          </div>
+          <div class="flex gap-2">
+            <button type="submit" class="flex-1 py-3 bg-violet-600 text-white rounded hover:bg-violet-700 font-medium">
+              ${t('wallet.join_wallet')}
+            </button>
+            <button type="button" onclick="closeModal()" class="flex-1 py-3 bg-gray-300 text-gray-700 rounded hover:bg-gray-400 font-medium">
+              ${t('common.cancel')}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `;
+}
+
+async function handleJoinWalletSubmit(event) {
+  event.preventDefault();
+  const formData = new FormData(event.target);
+  const inviteCode = String(formData.get('invite_code') || '').trim().toUpperCase();
+
+  if (!inviteCode) {
+    showValidationError(t('wallet.enter_invite_code'));
     return;
   }
 
   try {
-    const response = await axios.delete(`/api/wallets/${walletId}`);
+    const response = await axios.post('/api/wallets/join', {
+      invite_code: inviteCode,
+      nickname: sanitizeString(formData.get('nickname'))
+    });
+
     if (response.data.success) {
-      setCurrentWalletId(response.data.current_wallet_id || null);
-      alert(t('wallet.delete_wallet_done'));
+      await fetchWallets();
+      if (response.data.wallet?.id) {
+        setCurrentWalletId(response.data.wallet.id);
+      }
+      closeModal();
+      alert(t('wallet.join_success'));
+      await renderWalletView();
+    }
+  } catch (error) {
+    alert(error.response?.data?.error || t('wallet.join_error'));
+  }
+}
+
+function getWalletTransactionCategoryType(transactionType) {
+  return transactionType === 'deposit' ? 'income' : 'expense';
+}
+
+function updateWalletTransactionCategoryOptions() {
+  const typeSelect = document.getElementById('wallet-transaction-type');
+  const categorySelect = document.getElementById('wallet-transaction-category');
+  if (!typeSelect || !categorySelect) return;
+
+  const categoryType = getWalletTransactionCategoryType(typeSelect.value);
+  const options = getCategoryOptions(categoryType);
+  const fallback = categoryType === 'income' ? t('common.income') : t('common.expense');
+
+  categorySelect.innerHTML = options
+    .map((category, index) => `<option value="${category}" ${index === 0 ? 'selected' : ''}>${translateCategoryName(category)}</option>`)
+    .join('');
+
+  if (options.length === 0) {
+    categorySelect.innerHTML = `<option value="${fallback}" selected>${fallback}</option>`;
+  }
+}
+
+function openWalletTransactionModal(defaultAccountId = null) {
+  if (!state.currentWalletId) {
+    alert(t('wallet.select_wallet_first'));
+    return;
+  }
+  if (state.accounts.length === 0) {
+    alert(t('wallet.add_first_account'));
+    return;
+  }
+
+  const modalContainer = document.getElementById('modal-container');
+  const selectedAccountId = defaultAccountId || state.accounts[0]?.id || '';
+
+  modalContainer.innerHTML = `
+    <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onclick="closeModal(event)">
+      <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4" onclick="event.stopPropagation()">
+        <h3 class="text-xl font-bold mb-4">${t('wallet.new_transaction')}</h3>
+        <form onsubmit="handleWalletTransactionSubmit(event)" class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('wallet.transaction_type')}</label>
+            <select name="type" id="wallet-transaction-type" class="w-full px-4 py-2 border rounded" onchange="updateWalletTransactionCategoryOptions()">
+              <option value="withdraw">${t('wallet.tx_type_withdraw')}</option>
+              <option value="deposit">${t('wallet.tx_type_deposit')}</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('wallet.account')}</label>
+            <select name="account_id" class="w-full px-4 py-2 border rounded" required>
+              ${state.accounts.map(account => `
+                <option value="${account.id}" ${Number(selectedAccountId) === Number(account.id) ? 'selected' : ''}>
+                  ${account.name} (${formatCurrencyByCode(account.balance, account.currency)})
+                </option>
+              `).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('transaction.category')}</label>
+            <select name="category" id="wallet-transaction-category" class="w-full px-4 py-2 border rounded"></select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('common.amount')}</label>
+            <input type="number" name="amount" class="w-full px-4 py-2 border rounded" min="0.01" step="0.01" required>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('wallet.transaction_date')}</label>
+            <input type="date" name="transaction_date" value="${getDateString(new Date())}" class="w-full px-4 py-2 border rounded" required>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2">${t('common.description')}</label>
+            <input type="text" name="description" class="w-full px-4 py-2 border rounded" maxlength="100">
+          </div>
+          <div class="flex gap-2">
+            <button type="submit" class="flex-1 py-3 bg-emerald-600 text-white rounded hover:bg-emerald-700 font-medium">
+              ${t('wallet.new_transaction')}
+            </button>
+            <button type="button" onclick="closeModal()" class="flex-1 py-3 bg-gray-300 text-gray-700 rounded hover:bg-gray-400 font-medium">
+              ${t('common.cancel')}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `;
+
+  updateWalletTransactionCategoryOptions();
+}
+
+async function handleWalletTransactionSubmit(event) {
+  event.preventDefault();
+  const formData = new FormData(event.target);
+  const amountValidation = validatePositiveNumber(formData.get('amount'), t('common.amount'));
+  if (!amountValidation.valid) {
+    showValidationError(amountValidation.error);
+    return;
+  }
+
+  const dateValidation = validateDate(formData.get('transaction_date'), t('wallet.transaction_date'));
+  if (!dateValidation.valid) {
+    showValidationError(dateValidation.error);
+    return;
+  }
+
+  const accountId = Number(formData.get('account_id'));
+  if (!Number.isInteger(accountId) || accountId <= 0) {
+    showValidationError(t('wallet.bulk_require_account'));
+    return;
+  }
+
+  try {
+    const response = await axios.post('/api/wallet-transactions', {
+      wallet_id: state.currentWalletId,
+      account_id: accountId,
+      type: String(formData.get('type') || 'withdraw'),
+      amount: amountValidation.value,
+      category: sanitizeString(formData.get('category')),
+      description: sanitizeString(formData.get('description')),
+      transaction_date: dateValidation.value
+    });
+
+    if (response.data.success) {
       closeModal();
       await renderWalletView();
     }
   } catch (error) {
-    alert(error.response?.data?.error || '공유지갑 삭제 중 오류가 발생했습니다.');
+    alert(error.response?.data?.error || t('wallet.transaction_error'));
   }
 }
 
@@ -3725,16 +3853,16 @@ async function renderFixedExpensesView() {
   
   const contentArea = document.getElementById('content-area');
   contentArea.innerHTML = `
-    <div class="space-y-6">
+    <div class="space-y-6 fixed-expenses-view">
       <div class="flex justify-between items-center mb-4">
         <h3 class="text-xl font-bold">${t('fixed.title')}</h3>
-        <button onclick="openFixedExpenseModal()" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">
+        <button onclick="openFixedExpenseModal()" class="fixed-action-button px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">
           <i class="fas fa-plus"></i>
         </button>
       </div>
       
       <!-- 안내 메시지 -->
-      <div class="bg-blue-50 border-l-4 border-blue-500 p-4 rounded">
+      <div class="fixed-hover-surface bg-blue-50 border-l-4 border-blue-500 p-4 rounded">
         <div class="flex items-start">
           <i class="fas fa-info-circle text-blue-500 text-xl mr-3 mt-1"></i>
           <div>
@@ -3750,7 +3878,7 @@ async function renderFixedExpensesView() {
 
       <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
         ${summaryCards.map(card => `
-          <div class="bg-gradient-to-br ${card.tone} text-white p-5 rounded-xl shadow-lg">
+          <div class="fixed-hover-surface bg-gradient-to-br ${card.tone} text-white p-5 rounded-xl shadow-lg">
             <p class="text-sm text-white/80">${card.label}</p>
             <p class="text-3xl font-bold mt-2">${card.value}</p>
           </div>
@@ -3758,20 +3886,20 @@ async function renderFixedExpensesView() {
       </div>
       
       <!-- 월 선택 네비게이션 -->
-      <div class="flex items-center justify-between bg-white p-4 rounded-lg shadow">
-        <button onclick="changeFixedExpenseMonth(-1)" class="p-2 hover:bg-gray-100 rounded">
+      <div class="fixed-hover-surface flex items-center justify-between bg-white p-4 rounded-lg shadow">
+        <button onclick="changeFixedExpenseMonth(-1)" class="fixed-action-button p-2 hover:bg-gray-100 rounded">
           <i class="fas fa-chevron-left"></i>
         </button>
         <h3 class="text-lg font-semibold">
           ${getLanguage() === 'ko' ? `${state.currentMonth.getFullYear()}년 ${state.currentMonth.getMonth() + 1}월` : state.currentMonth.toLocaleString('en-US', { month: 'long', year: 'numeric' })}
         </h3>
-        <button onclick="changeFixedExpenseMonth(1)" class="p-2 hover:bg-gray-100 rounded">
+        <button onclick="changeFixedExpenseMonth(1)" class="fixed-action-button p-2 hover:bg-gray-100 rounded">
           <i class="fas fa-chevron-right"></i>
         </button>
       </div>
 
       ${sections.map(section => `
-        <section class="bg-white rounded-lg shadow p-6">
+        <section class="fixed-hover-surface bg-white rounded-lg shadow p-6">
           <div class="flex items-center justify-between mb-4">
             <h3 class="text-xl font-bold text-gray-800">${section.title}</h3>
             <span class="text-sm text-gray-500">${section.items.length}${getLanguage() === 'ko' ? '건' : ''}</span>
@@ -3786,7 +3914,7 @@ async function renderFixedExpensesView() {
                 const status = getFixedExpenseStatusMeta(instance);
 
                 return `
-                  <article class="border border-gray-200 rounded-xl p-4 hover:shadow-md transition">
+                  <article class="fixed-hover-surface border border-gray-200 rounded-xl p-4 hover:shadow-md transition">
                     <div class="flex items-start justify-between gap-3">
                       <div>
                         <h4 class="text-lg font-bold text-gray-800">${instance.name}</h4>
@@ -6958,7 +7086,7 @@ async function handleSavingsGoalSubmit(event, accountId) {
     
     if (response.data.success) {
       closeModal();
-      alert(goalValidation.value === 0 ? '저축 목표가 제거되었습니다.' : '저축 목표가 설정되었습니다.');
+      alert('저축 목표가 설정되었습니다.');
       renderSavingsView();
     }
   } catch (error) {

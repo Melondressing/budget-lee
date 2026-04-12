@@ -362,70 +362,6 @@ function buildUserIdClause(columnName: string, userId: number | string | undefin
   }
 }
 
-function normalizeSavingsAccountName(value: unknown): string {
-  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase()
-}
-
-function mergeSavingsAccountRows(rows: any[]): any[] {
-  const groups = new Map<string, any[]>()
-
-  for (const rawRow of rows || []) {
-    const row = {
-      ...rawRow,
-      id: Number(rawRow.id),
-      balance: Number(rawRow.balance || 0),
-      savings_goal: Number(rawRow.savings_goal || 0),
-      total_savings: Number(rawRow.total_savings || 0)
-    }
-    const key = normalizeSavingsAccountName(row.name) || `id:${row.id}`
-    if (!groups.has(key)) groups.set(key, [])
-    groups.get(key)!.push(row)
-  }
-
-  return Array.from(groups.values())
-    .map((group) => {
-      const sorted = [...group].sort((a, b) => Number(b.id || 0) - Number(a.id || 0))
-      const primary = sorted[0]
-      return {
-        ...primary,
-        balance: Math.max(...sorted.map((row) => Number(row.balance || 0))),
-        savings_goal: Math.max(...sorted.map((row) => Number(row.savings_goal || 0))),
-        total_savings: sorted.reduce((sum, row) => sum + Number(row.total_savings || 0), 0),
-        linked_ids: sorted.map((row) => Number(row.id)),
-        duplicate_count: sorted.length
-      }
-    })
-    .sort((a, b) => {
-      const aTime = Date.parse(String(a.created_at || '')) || 0
-      const bTime = Date.parse(String(b.created_at || '')) || 0
-      if (aTime !== bTime) return aTime - bTime
-      return Number(a.id || 0) - Number(b.id || 0)
-    })
-}
-
-async function findSavingsAccountGroup(DB: D1Database, userId: number | string | undefined | null, accountId: string | number): Promise<any[] | null> {
-  const savingsScope = buildUserIdClause('user_id', userId)
-  const target = await DB.prepare(`
-    SELECT *
-    FROM savings_accounts
-    WHERE id = ? AND ${savingsScope.clause}
-    LIMIT 1
-  `).bind(accountId, ...savingsScope.bindings).first() as any
-
-  if (!target) return null
-
-  const normalizedName = normalizeSavingsAccountName(target.name)
-  const result = await DB.prepare(`
-    SELECT *
-    FROM savings_accounts
-    WHERE ${savingsScope.clause}
-      AND LOWER(TRIM(name)) = ?
-    ORDER BY id DESC
-  `).bind(...savingsScope.bindings, normalizedName).all()
-
-  return (result.results || []) as any[]
-}
-
 // CORS 활성화
 app.use('/api/*', cors())
 
@@ -1108,8 +1044,8 @@ app.get('/api/savings-accounts', authMiddleware, async (c) => {
     GROUP BY sa.id
     ORDER BY sa.created_at ASC
   `).bind(...transactionScope.bindings, ...savingsScope.bindings).all()
-
-  return c.json({ success: true, data: mergeSavingsAccountRows(result.results || []) })
+  
+  return c.json({ success: true, data: result.results })
 })
 
 // 1.2 저축 통장 생성
@@ -1120,21 +1056,6 @@ app.post('/api/savings-accounts', authMiddleware, async (c) => {
   
   if (!name) {
     return c.json({ success: false, error: '통장 이름을 입력해주세요.' }, 400)
-  }
-
-  const normalizedName = normalizeSavingsAccountName(name)
-  const savingsScope = buildUserIdClause('user_id', userId)
-  const existing = await DB.prepare(`
-    SELECT *
-    FROM savings_accounts
-    WHERE ${savingsScope.clause}
-      AND LOWER(TRIM(name)) = ?
-    ORDER BY id DESC
-  `).bind(...savingsScope.bindings, normalizedName).all()
-
-  if ((existing.results || []).length > 0) {
-    const merged = mergeSavingsAccountRows(existing.results || [])
-    return c.json({ success: true, id: merged[0]?.id, data: merged[0], reused: true })
   }
   
   const result = await DB.prepare(`
@@ -1154,21 +1075,12 @@ app.put('/api/savings-accounts/:id', authMiddleware, async (c) => {
   if (!name || name.trim() === '') {
     return c.json({ success: false, error: '통장 이름을 입력해주세요.' }, 400)
   }
-
-  const group = await findSavingsAccountGroup(DB, userId, id)
-  if (!group || group.length === 0) {
-    return c.json({ success: false, error: '저축 통장을 찾을 수 없습니다.' }, 404)
-  }
-
-  const savingsScope = buildUserIdClause('user_id', userId)
-  const currentName = normalizeSavingsAccountName(group[0]?.name)
-
+  
   await DB.prepare(`
     UPDATE savings_accounts 
     SET name = ?
-    WHERE ${savingsScope.clause}
-      AND LOWER(TRIM(name)) = ?
-  `).bind(name.trim(), ...savingsScope.bindings, currentName).run()
+    WHERE id = ? AND user_id = ?
+  `).bind(name.trim(), id, userId?.toString()).run()
   
   return c.json({ success: true })
 })
@@ -1178,20 +1090,8 @@ app.delete('/api/savings-accounts/:id', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
   const id = c.req.param('id')
-
-  const group = await findSavingsAccountGroup(DB, userId, id)
-  if (!group || group.length === 0) {
-    return c.json({ success: false, error: '저축 통장을 찾을 수 없습니다.' }, 404)
-  }
-
-  const savingsScope = buildUserIdClause('user_id', userId)
-  const currentName = normalizeSavingsAccountName(group[0]?.name)
-
-  await DB.prepare(`
-    DELETE FROM savings_accounts
-    WHERE ${savingsScope.clause}
-      AND LOWER(TRIM(name)) = ?
-  `).bind(...savingsScope.bindings, currentName).run()
+  
+  await DB.prepare(`DELETE FROM savings_accounts WHERE id = ? AND user_id = ?`).bind(id, userId?.toString()).run()
   
   return c.json({ success: true })
 })
@@ -1206,21 +1106,12 @@ app.put('/api/savings-accounts/:id/goal', authMiddleware, async (c) => {
   if (savings_goal === undefined || savings_goal < 0) {
     return c.json({ success: false, error: '유효한 목표 금액을 입력해주세요.' }, 400)
   }
-
-  const group = await findSavingsAccountGroup(DB, userId, id)
-  if (!group || group.length === 0) {
-    return c.json({ success: false, error: '저축 통장을 찾을 수 없습니다.' }, 404)
-  }
-
-  const savingsScope = buildUserIdClause('user_id', userId)
-  const currentName = normalizeSavingsAccountName(group[0]?.name)
-
+  
   await DB.prepare(`
     UPDATE savings_accounts 
     SET savings_goal = ?
-    WHERE ${savingsScope.clause}
-      AND LOWER(TRIM(name)) = ?
-  `).bind(savings_goal, ...savingsScope.bindings, currentName).run()
+    WHERE id = ?
+  `).bind(savings_goal, id).run()
   
   return c.json({ success: true })
 })
@@ -1668,7 +1559,7 @@ app.get('/api/settings', authMiddleware, async (c) => {
   let result = await DB.prepare(`
     SELECT * FROM settings
     WHERE ${settingsScope.clause}
-    ORDER BY CASE WHEN user_id = ? THEN 0 ELSE 1 END, created_at DESC, id DESC
+    ORDER BY CASE WHEN user_id = ? THEN 0 ELSE 1 END, updated_at DESC, id DESC
     LIMIT 1
   `).bind(...settingsScope.bindings, userId?.toString()).first()
   
@@ -1692,16 +1583,9 @@ app.put('/api/settings', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = c.get('userId')
   const { currency, initial_balance, cash_on_hand, category_colors } = await c.req.json()
-  const settingsScope = buildUserIdClause('user_id', userId)
   
   // 설정이 없으면 생성
-  const existing = await DB.prepare(`
-    SELECT id, user_id
-    FROM settings
-    WHERE ${settingsScope.clause}
-    ORDER BY CASE WHEN user_id = ? THEN 0 ELSE 1 END, created_at DESC, id DESC
-    LIMIT 1
-  `).bind(...settingsScope.bindings, userId?.toString()).first() as any
+  const existing = await DB.prepare(`SELECT id FROM settings WHERE user_id = ?`).bind(userId?.toString()).first()
   
   if (!existing) {
     await DB.prepare(`
@@ -1717,15 +1601,14 @@ app.put('/api/settings', authMiddleware, async (c) => {
   } else {
     await DB.prepare(`
       UPDATE settings 
-      SET currency = ?, initial_balance = ?, cash_on_hand = ?, category_colors = ?, user_id = ?
-      WHERE id = ?
+      SET currency = ?, initial_balance = ?, cash_on_hand = ?, category_colors = ?
+      WHERE user_id = ?
     `).bind(
       currency, 
       initial_balance || 0, 
       cash_on_hand || 0, 
       category_colors ? JSON.stringify(category_colors) : null,
-      userId?.toString(),
-      existing.id
+      userId?.toString()
     ).run()
   }
   
@@ -2791,48 +2674,39 @@ app.post('/api/wallets', authMiddleware, async (c) => {
   }
 })
 
-app.delete('/api/wallets/:id', authMiddleware, async (c) => {
+app.post('/api/wallets/join', authMiddleware, async (c) => {
   const { DB } = c.env
   const userId = Number(c.get('userId') || 0)
-  const walletId = normalizeOptionalInteger(c.req.param('id'))
+  const { invite_code, nickname } = await c.req.json()
 
-  if (!walletId) {
-    return c.json({ success: false, error: '공유지갑을 찾을 수 없습니다.' }, 404)
+  const normalizedCode = String(invite_code || '').trim().toUpperCase()
+  if (!normalizedCode) {
+    return c.json({ success: false, error: '초대 코드를 입력해주세요.' }, 400)
   }
 
   try {
     const wallet = await DB.prepare(`
-      SELECT id, owner_user_id, is_active
+      SELECT id
       FROM shared_wallets
-      WHERE id = ?
-    `).bind(walletId).first() as any
+      WHERE invite_code = ?
+        AND is_active = 1
+      LIMIT 1
+    `).bind(normalizedCode).first() as any
 
-    if (!wallet || Number(wallet.is_active) !== 1) {
-      return c.json({ success: false, error: '공유지갑을 찾을 수 없습니다.' }, 404)
-    }
-
-    if (Number(wallet.owner_user_id) !== userId) {
-      return c.json({ success: false, error: '공유지갑을 삭제할 권한이 없습니다.' }, 403)
+    if (!wallet) {
+      return c.json({ success: false, error: '유효하지 않은 초대 코드입니다.' }, 404)
     }
 
     await DB.prepare(`
-      UPDATE shared_wallets
-      SET is_active = 0,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).bind(walletId).run()
+      INSERT OR IGNORE INTO shared_wallet_members (shared_wallet_id, user_id, nickname)
+      VALUES (?, ?, ?)
+    `).bind(Number(wallet.id), userId, nickname ? String(nickname).trim() : null).run()
 
-    const wallets = await getAccessibleWallets(DB, userId)
-
-    return c.json({
-      success: true,
-      deleted_wallet_id: walletId,
-      current_wallet_id: wallets[0]?.id || null,
-      wallets
-    })
+    const joinedWallet = await getAccessibleWallet(DB, userId, Number(wallet.id))
+    return c.json({ success: true, wallet: joinedWallet })
   } catch (error: any) {
-    console.error('[Wallets] Delete error:', error)
-    return c.json({ success: false, error: '공유지갑 삭제 실패' }, 500)
+    console.error('[Wallets] Join error:', error)
+    return c.json({ success: false, error: '공유지갑 참여 실패' }, 500)
   }
 })
 
@@ -2882,14 +2756,21 @@ app.get('/api/wallet-transactions', authMiddleware, async (c) => {
 
     const result = await DB.prepare(query).bind(...params).all()
     const transactions = (result.results || []).map((row: any) => {
+      const rawType = String(row.type || '')
+      const normalizedType =
+        rawType === 'withdraw' || rawType === 'withdrawal' ? 'expense' :
+        rawType === 'deposit' ? 'income' :
+        rawType
       const accountType = row.account_name ? inferWalletAccountType(row) : null
       const paymentMethod =
         accountType === 'credit_card' ? 'card' :
         accountType === 'cash' ? 'cash' :
-        row.type === 'expense' ? 'transfer' : 'transfer'
+        normalizedType === 'expense' ? 'transfer' : 'transfer'
 
       return {
         ...row,
+        raw_type: rawType,
+        type: normalizedType,
         date: row.transaction_date,
         account_type: accountType,
         payment_method: paymentMethod,
@@ -2901,6 +2782,93 @@ app.get('/api/wallet-transactions', authMiddleware, async (c) => {
   } catch (error: any) {
     console.error('[WalletTransactions] List error:', error)
     return c.json({ success: false, error: '공유지갑 거래 조회 실패' }, 500)
+  }
+})
+
+app.post('/api/wallet-transactions', authMiddleware, async (c) => {
+  const { DB } = c.env
+  const userId = Number(c.get('userId') || 0)
+  const { wallet_id, account_id, type, amount, category, description, transaction_date } = await c.req.json()
+
+  const normalizedType = String(type || '').trim().toLowerCase()
+  if (!['deposit', 'withdraw'].includes(normalizedType)) {
+    return c.json({ success: false, error: '유효하지 않은 거래 유형입니다.' }, 400)
+  }
+  if (!account_id) {
+    return c.json({ success: false, error: '거래 계좌를 선택해주세요.' }, 400)
+  }
+  if (!transaction_date) {
+    return c.json({ success: false, error: '거래 날짜를 입력해주세요.' }, 400)
+  }
+
+  const normalizedAmount = Number(amount)
+  if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) {
+    return c.json({ success: false, error: '거래 금액은 0보다 커야 합니다.' }, 400)
+  }
+
+  try {
+    const wallet = await getAccessibleWallet(DB, userId, normalizeOptionalInteger(wallet_id))
+    if (!wallet) {
+      return c.json({ success: false, error: '공유지갑을 찾을 수 없습니다.' }, 404)
+    }
+
+    const account = await validateOwnedActiveAccount(DB, userId, Number(account_id), wallet.id)
+    if (!account) {
+      return c.json({ success: false, error: '거래 계좌를 찾을 수 없습니다.' }, 404)
+    }
+
+    if (normalizedType === 'withdraw' && Number(account.balance || 0) < normalizedAmount) {
+      return c.json({ success: false, error: '계좌 잔액이 부족합니다.' }, 400)
+    }
+
+    const normalizedCategory = String(category || '').trim() || (normalizedType === 'deposit' ? '입금' : '지출')
+    const delta = normalizedType === 'deposit' ? normalizedAmount : -normalizedAmount
+
+    const batch = [
+      DB.prepare(`
+        INSERT INTO shared_wallet_transactions (
+          shared_wallet_id,
+          user_id,
+          type,
+          amount,
+          category,
+          description,
+          transaction_date,
+          account_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        wallet.id,
+        userId,
+        normalizedType,
+        normalizedAmount,
+        normalizedCategory,
+        description ? String(description).trim() : null,
+        transaction_date,
+        Number(account_id)
+      ),
+      buildAccountBalanceAdjustmentStatement(DB, userId, Number(account_id), delta, wallet.id)
+    ]
+
+    const results = await DB.batch(batch)
+    await recalcSharedWalletSummary(DB, wallet.id)
+
+    return c.json({
+      success: true,
+      transaction: {
+        id: Number(results[0].meta.last_row_id),
+        wallet_id: wallet.id,
+        account_id: Number(account_id),
+        type: normalizedType,
+        amount: normalizedAmount,
+        category: normalizedCategory,
+        description: description ? String(description).trim() : null,
+        transaction_date
+      }
+    })
+  } catch (error: any) {
+    console.error('[WalletTransactions] Create error:', error)
+    return c.json({ success: false, error: '공유지갑 거래 등록 실패' }, 500)
   }
 })
 

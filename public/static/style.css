@@ -663,6 +663,104 @@ button[onclick*="Modal"],
   box-shadow: var(--shadow-lg);
 }
 
+/* 로즈 버튼 (고정지출 빠른 액션용) */
+.bg-rose-500,
+.bg-rose-600 {
+  background: linear-gradient(135deg, rgba(232, 180, 184, 0.88), rgba(208, 148, 152, 0.95)) !important;
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  border: 2px solid rgba(232, 180, 184, 0.6) !important;
+  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  color: #ffffff !important;
+  font-weight: 600;
+}
+
+.bg-rose-500:hover,
+.bg-rose-600:hover {
+  background: linear-gradient(135deg, rgba(232, 180, 184, 0.98), rgba(208, 148, 152, 1)) !important;
+  transform: translateY(-3px) scale(1.02);
+  box-shadow: var(--shadow-lg);
+}
+
+/* 시안/보라/에메랄드 버튼 보강 (공유지갑 액션용) */
+.bg-cyan-600,
+.bg-cyan-700 {
+  background: linear-gradient(135deg, rgba(103, 191, 201, 0.88), rgba(57, 150, 163, 0.95)) !important;
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  border: 2px solid rgba(103, 191, 201, 0.6) !important;
+  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  color: #ffffff !important;
+  font-weight: 600;
+}
+
+.bg-cyan-600:hover,
+.bg-cyan-700:hover {
+  background: linear-gradient(135deg, rgba(103, 191, 201, 0.97), rgba(57, 150, 163, 1)) !important;
+  transform: translateY(-3px) scale(1.02);
+  box-shadow: var(--shadow-lg);
+}
+
+.bg-violet-600,
+.bg-violet-700 {
+  background: linear-gradient(135deg, rgba(151, 140, 206, 0.9), rgba(123, 112, 180, 0.96)) !important;
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  border: 2px solid rgba(151, 140, 206, 0.6) !important;
+  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  color: #ffffff !important;
+  font-weight: 600;
+}
+
+.bg-violet-600:hover,
+.bg-violet-700:hover {
+  background: linear-gradient(135deg, rgba(151, 140, 206, 1), rgba(123, 112, 180, 1)) !important;
+  transform: translateY(-3px) scale(1.02);
+  box-shadow: var(--shadow-lg);
+}
+
+.bg-emerald-600,
+.bg-emerald-700 {
+  background: linear-gradient(135deg, rgba(102, 190, 161, 0.9), rgba(58, 153, 122, 0.96)) !important;
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  border: 2px solid rgba(102, 190, 161, 0.6) !important;
+  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  color: #ffffff !important;
+  font-weight: 600;
+}
+
+.bg-emerald-600:hover,
+.bg-emerald-700:hover {
+  background: linear-gradient(135deg, rgba(102, 190, 161, 1), rgba(58, 153, 122, 1)) !important;
+  transform: translateY(-3px) scale(1.02);
+  box-shadow: var(--shadow-lg);
+}
+
+/* 공유지갑/고정지출 카드 반응 애니메이션 */
+.wallet-view .wallet-hover-surface,
+.fixed-expenses-view .fixed-hover-surface {
+  transition: transform 0.22s ease, box-shadow 0.22s ease, background-color 0.22s ease, border-color 0.22s ease;
+}
+
+.wallet-view .wallet-hover-surface:hover,
+.fixed-expenses-view .fixed-hover-surface:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--shadow-lg) !important;
+  border-color: rgba(255, 255, 255, 0.72) !important;
+}
+
+.wallet-view .wallet-action-button,
+.fixed-expenses-view .fixed-action-button {
+  transition: transform 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
+}
+
+.wallet-view .wallet-action-button:hover,
+.fixed-expenses-view .fixed-action-button:hover {
+  transform: translateY(-2px) scale(1.01);
+  box-shadow: var(--shadow-md);
+}
+
 /* 달력 크기 복구 */
 .calendar-cell-compact {
   height: 80px !important;
